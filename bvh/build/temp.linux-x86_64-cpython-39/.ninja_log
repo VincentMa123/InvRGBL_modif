@@ -3,3 +3,7 @@
 2	14244	1756179890744304098	/Node09_nvme/chenxiaoxue/chenxx/invRGBL/bvh/build/temp.linux-x86_64-cpython-39/Node09_nvme/chenxiaoxue/chenxx/invRGBL/bvh/src/construct.o	5ba2760b90ddccc6
 1	18037	1756179890740304005	/Node09_nvme/chenxiaoxue/chenxx/invRGBL/bvh/build/temp.linux-x86_64-cpython-39/Node09_nvme/chenxiaoxue/chenxx/invRGBL/bvh/src/bindings.o	d4f863664dbe8390
 2	51545	1756179890744304098	/Node09_nvme/chenxiaoxue/chenxx/invRGBL/bvh/build/temp.linux-x86_64-cpython-39/Node09_nvme/chenxiaoxue/chenxx/invRGBL/bvh/src/bvh.o	d645f90394c8af2
+13	15451	1775148736026465249	/lab/haoq_lab/cse12310504/InvRGBL/bvh/build/temp.linux-x86_64-cpython-39/lab/haoq_lab/cse12310504/InvRGBL/bvh/src/trace.o	182b1b6c076b3063
+12	17284	1775148736026465249	/lab/haoq_lab/cse12310504/InvRGBL/bvh/build/temp.linux-x86_64-cpython-39/lab/haoq_lab/cse12310504/InvRGBL/bvh/src/construct.o	2f42e26e761bfb2b
+11	25668	1775148736026465249	/lab/haoq_lab/cse12310504/InvRGBL/bvh/build/temp.linux-x86_64-cpython-39/lab/haoq_lab/cse12310504/InvRGBL/bvh/src/bindings.o	307a8b79c213513d
+12	69749	1775148736026465249	/lab/haoq_lab/cse12310504/InvRGBL/bvh/build/temp.linux-x86_64-cpython-39/lab/haoq_lab/cse12310504/InvRGBL/bvh/src/bvh.o	8a49071912478e46

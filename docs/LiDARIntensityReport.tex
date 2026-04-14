@@ -1,0 +1,303 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{listings}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\lstdefinestyle{bashstyle}{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=fullflexible,
+    frame=single,
+    backgroundcolor=\color{black!3}
+}
+
+\lstdefinestyle{pystyle}{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=fullflexible,
+    frame=single,
+    backgroundcolor=\color{black!3}
+}
+
+\title{LiDAR Intensity Preprocessing and Visualization Report}
+\author{InvRGBL Repository Note}
+\date{April 8, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Purpose}
+This note documents how LiDAR intensity preprocessing is implemented in the current InvRGBL codebase and how the accompanying visualization script should be interpreted.
+
+The goal of the preprocessing stage is to convert raw Waymo LiDAR returns into per-camera sparse intensity maps that can be consumed by the training pipeline. The goal of the visualization stage is to verify that these maps are geometrically aligned with the RGB images and numerically well-formed.
+
+\section{Files Involved}
+The current implementation is split across the following files:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \texttt{datasets/waymo/waymo\_preprocess.py}: extracts LiDAR points, projects them to each camera, and saves sparse intensity maps.
+    \item \texttt{datasets/waymo/waymo\_utils.py}: provides the camera projection utility \texttt{project\_vehicle\_to\_image}.
+    \item \texttt{tools/visualize\_intensity.py}: generates debugging visualizations and summary statistics.
+    \item \texttt{datasets/base/pixel\_source.py}: loads the saved \texttt{.npy} intensity maps during training.
+\end{itemize}
+
+\section{Preprocessing Pipeline}
+
+\subsection{Input Data}
+The Waymo raw data consists of TFRecord files containing synchronized camera images, LiDAR range images, calibration parameters, vehicle pose, and annotations.
+
+For intensity preprocessing, the implementation uses:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item the LiDAR range images from both returns,
+    \item the per-frame vehicle pose,
+    \item the camera calibration parameters,
+    \item the LiDAR intensity values attached to each point.
+\end{itemize}
+
+\subsection{Point Extraction}
+Inside \texttt{WaymoProcessor.save\_intensity}, the code first converts the raw Waymo range images into point clouds using the existing helper:
+
+\begin{lstlisting}[style=pystyle,language=Python]
+convert_range_image_to_point_cloud_flow(..., ri_index=0)
+convert_range_image_to_point_cloud_flow(..., ri_index=1)
+\end{lstlisting}
+
+The first and second returns are concatenated. For each point, the implementation keeps its 3D location in the vehicle frame and its associated LiDAR intensity.
+
+If the two returns are denoted by
+\[
+P^{(0)}, I^{(0)} \quad \text{and} \quad P^{(1)}, I^{(1)},
+\]
+then the merged point set is
+\[
+P = \left[P^{(0)}; P^{(1)}\right],
+\qquad
+I = \left[I^{(0)}; I^{(1)}\right].
+\]
+
+\subsection{Projection to the Camera Plane}
+For each of the five Waymo cameras, the code calls:
+
+\begin{lstlisting}[style=pystyle,language=Python]
+project_vehicle_to_image(frame.pose, calib, points)
+\end{lstlisting}
+
+This function transforms points from the vehicle frame into world coordinates using the ego pose, then projects them into the image plane using the Waymo camera model and calibration metadata.
+
+Each projected point yields
+\[
+(u_i, v_i, o_i),
+\]
+where $u_i$ and $v_i$ are image coordinates and $o_i \in \{0,1\}$ indicates whether the projection is valid.
+
+Only valid points are kept. Their coordinates are clipped to the image bounds:
+\[
+u_i \leftarrow \mathrm{clip}(u_i, 0, W - 1),
+\qquad
+v_i \leftarrow \mathrm{clip}(v_i, 0, H - 1).
+\]
+
+\subsection{Sparse Intensity Map Construction}
+For each camera, the implementation creates a zero-initialized image:
+\[
+M \in \mathbb{R}^{H \times W}.
+\]
+
+For every valid projected point, the corresponding pixel receives its LiDAR intensity:
+\[
+M[v_i, u_i] = I_i.
+\]
+
+This produces a sparse image because only a small subset of RGB pixels are directly observed by LiDAR. In road scenes, most nonzero values appear in the lower part of the frame, where the road and nearby objects lie.
+
+\subsection{Normalization}
+The current code normalizes each camera-frame intensity map independently before saving:
+\[
+\hat{M} =
+\begin{cases}
+M / \max(M), & \text{if } \max(M) > 0, \\
+M, & \text{otherwise.}
+\end{cases}
+\]
+
+This makes all saved maps lie in the range $[0,1]$. The normalization is per image, not global across the dataset.
+
+\subsection{Saved Output Format}
+Each intensity map is saved as a NumPy array with shape
+\[
+H \times W \times 1
+\]
+and type \texttt{float32}.
+
+The output naming convention is:
+\begin{lstlisting}[style=bashstyle]
+data/waymo/processed/training/<scene_id>/intensity/<frame>_<camera>.npy
+\end{lstlisting}
+
+For example:
+\begin{lstlisting}[style=bashstyle]
+data/waymo/processed/training/023/intensity/000_0.npy
+\end{lstlisting}
+
+\section{How the Training Loader Uses the Maps}
+The training pipeline loads these \texttt{.npy} files in \texttt{pixel\_source.py}. Because the maps are sparse, the loader preserves the sparse structure when resizing them to the configured image resolution.
+
+This is important: a standard dense interpolation would blur and distort sparse LiDAR support. Instead, the implementation converts the map to a sparse COO representation, rescales the occupied coordinates, and reconstructs the resized image.
+
+\section{Why Basic Heatmaps Look Wrong}
+Two facts make naive visualization misleading:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item The maps are extremely sparse. Typically, more than $99\%$ of pixels are zero.
+    \item The nonzero values are strongly skewed toward very small magnitudes. Most positive values can be on the order of $10^{-6}$ to $10^{-5}$ after normalization.
+\end{enumerate}
+
+This means a plain call such as
+\begin{lstlisting}[style=pystyle,language=Python]
+plt.imshow(intensity_map)
+\end{lstlisting}
+often produces an image that looks almost entirely black or uniformly dark.
+
+Even a naive logarithmic transform can fail, because for small $x$,
+\[
+\log(1 + x) \approx x.
+\]
+So if $x$ is already tiny, \texttt{log1p} still produces tiny values with almost no visible contrast.
+
+\section{Visualization Script}
+
+\subsection{Script Purpose}
+The helper script
+\begin{lstlisting}[style=bashstyle]
+python tools/visualize_intensity.py --scene 23 --frame 0 --camera 0
+\end{lstlisting}
+produces a small debugging package for one scene, frame, and camera.
+
+Its outputs are written to:
+\begin{lstlisting}[style=bashstyle]
+debug/intensity_vis/<scene>/<frame_camera>/
+\end{lstlisting}
+
+\subsection{Outputs}
+The script saves the following files:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+File & Purpose \\
+\midrule
+\texttt{overlay.png} & RGB image with projected LiDAR support drawn in red \\
+\texttt{mask.png} & binary mask of pixels that received LiDAR intensity \\
+\texttt{nonzero.png} & intensity image with zero background hidden \\
+\texttt{log.png} & positive-pixel log-scaled visualization \\
+\texttt{lognorm.png} & logarithmic colormap normalization on expanded intensity \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Visibility Expansion for Debugging}
+Because valid LiDAR returns are often only one pixel wide, the script dilates them for display only. This does not modify the stored data. It only makes the saved images easier to read.
+
+If the original support mask is $B$, the script computes an expanded mask $\tilde{B}$ using a small neighborhood max operation over a few iterations. The same idea is applied to the intensity values for visualization-only images.
+
+This is why the overlay and the contrast-enhanced images show clear scanlines instead of nearly invisible isolated pixels.
+
+\subsection{How to Interpret Each Visualization}
+\paragraph{Overlay.}
+This is the most important diagnostic. If the preprocessing is correct, the projected support should align with road surfaces, nearby vehicles, curbs, and the lower parts of objects. It should not heavily populate the sky.
+
+\paragraph{Mask.}
+This shows where LiDAR support exists, independent of intensity magnitude. It is useful for checking coverage and calibration.
+
+\paragraph{Nonzero map.}
+This hides the zero background entirely and colors only valid LiDAR returns. It is often the clearest view of the structure of the map.
+
+\paragraph{Log map.}
+This shows the same nonzero support after logarithmic scaling and contrast normalization. It is useful for inspecting relative strength differences among the visible returns.
+
+\section{Observed Validation Behavior}
+For a tested sample scene and camera, the projected intensity map showed:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item roughly twenty-four thousand nonzero pixels,
+    \item support spanning almost the full image width,
+    \item vertical support concentrated in the lower part of the image,
+    \item scanline-like horizontal bands consistent with LiDAR acquisition,
+    \item good spatial alignment with the RGB image after overlay.
+\end{itemize}
+
+These are the expected qualitative signatures of a correct projection-based LiDAR intensity map in a forward-facing urban driving scene.
+
+\section{How to Run the Preprocessing}
+To generate intensity maps during Waymo preprocessing, the current command is:
+
+\begin{lstlisting}[style=bashstyle]
+python datasets/preprocess.py \
+    --data_root data/waymo/raw/ \
+    --target_dir data/waymo/processed \
+    --dataset waymo \
+    --split training \
+    --scene_ids 23 114 327 621 703 172 552 788 \
+    --workers 8 \
+    --process_keys intensity
+\end{lstlisting}
+
+Note that the output scene folders correspond to the indices used by the preprocessing pipeline.
+
+\section{How to Run the Visualization}
+Example:
+
+\begin{lstlisting}[style=bashstyle]
+python tools/visualize_intensity.py --scene 23 --frame 0 --camera 0
+\end{lstlisting}
+
+This generates a report directory under:
+
+\begin{lstlisting}[style=bashstyle]
+debug/intensity_vis/023/000_0/
+\end{lstlisting}
+
+\section{Recommended Validation Checklist}
+To confirm the preprocessing is working correctly:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item Check that \texttt{intensity} folders are created under each processed scene.
+    \item Verify that the saved arrays have shape $H \times W \times 1$ and type \texttt{float32}.
+    \item Confirm that the maps contain nonzero pixels but remain highly sparse.
+    \item Inspect \texttt{overlay.png} to verify geometric alignment with the RGB image.
+    \item Inspect \texttt{nonzero.png} or \texttt{log.png} to verify the expected scanline structure.
+    \item Optionally compare support against projected depth maps for stricter validation.
+\end{enumerate}
+
+\section{Conclusion}
+The implemented LiDAR intensity preprocessing in this repository follows a straightforward projection-based design:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item extract points and intensities from Waymo LiDAR returns,
+    \item project the points into each camera,
+    \item rasterize them into sparse per-camera intensity maps,
+    \item normalize and save them as \texttt{.npy} files,
+    \item verify them with overlay-based and contrast-enhanced visual diagnostics.
+\end{enumerate}
+
+The most reliable qualitative check is the RGB overlay. The contrast-enhanced views are useful supporting diagnostics, but plain heatmaps alone are not sufficient because of sparsity and heavy value skew.
+
+\end{document}

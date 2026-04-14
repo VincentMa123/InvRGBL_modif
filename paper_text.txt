@@ -1,0 +1,898 @@
+InvRGB+L: Inverse Rendering of Complex Scenes with
+Unified Color and LiDAR Reflectance Modeling
+XiaoxueChen1,2 BhargavChandaka2 Chih-HaoLin2 Ya-QinZhang1 DavidForsyth2
+HaoZhao1,3 ShenlongWang2
+1AIR,TsinghuaUniversity 2UniversityofIllinoisUrbana-Champaign 3BAAI
+Inputs Inverse Rendering Scene Editing
+Normal Rough
+Albedo Reflectance
+Videos LiDAR (w/ Intensity) Night Simulation Relighting Object Insertion
+ANlboremdaol NRoorumgahl
+ARlobuegdho RReeffleleccttaannccee
+Videos LiDAR (w/ Intensity) Night Simulation Relighting Object Insertion
+Figure1.Overview:InvRGB+LtakesRGBandLiDARsequencesasinputandoutputsa3Dscenewithhigh-fidelitygeometry,consistent
+albedoacrossRGBandLiDARspectra,androughness.Ourrepresentationenablesphotorealisticobjectinsertionandnightsimulations.
+Abstract 1.Introduction
+Inverse rendering is challenging because image observa-
+tionsarewildlyambiguous. Thesameimagecanbeinter-
+preted as a yellow wall lit by white light or as a wall that
+WepresentInvRGB+L,anovelinverserenderingmodelthat is half yellow and half white (Fig. 2); a dark region might
+reconstructslarge, relightable, anddynamicscenesfroma beinterpretedasawetareaorasacastshadow. Errorslike
+singleRGB+LiDARsequence.Conventionalinversegraph- theseinmaterialrecoveryresultinscenerenderingsthatcan
+ics methods rely primarily on RGB observations and use bejarringlybad. Evenstrongmaterialpriorsonlypartially
+LiDAR mainly for geometric information, often resulting mitigatetheseambiguities(Fig.2,middle).
+in suboptimal material estimates due to visible light inter- LiDARintensityprovidesstrongcuesforinverserender-
+ference. We find that LiDAR’s intensity values—captured ing. LiDAR sensors emit laser pulses that reflect off sur-
+withactiveilluminationinadifferentspectralrange—offer faces. As is well known, time-of-flight yields geometry.
+complementary cues for robust material estimation under Wedemonstratethereturnedpower(analogoustoRGBin-
+variable lighting. Inspired by this, InvRGB+L leverages tensity, Fig.2) provides rich surface material information.
+LiDAR intensity cues to overcome challenges inherent in LiDARderivedmaterialcuesareextremelyrobusttowide
+RGB-centricinversegraphicsthroughtwokeyinnovations: changes in illumination conditions, because there is very
+(1) a novel physics-based LiDAR shading model and (2) little cross-talk between the narrow-band infrared used by
+RGB–LiDAR material consistency losses. The model pro- LiDAR and typical illuminants indoors and outdoors. But
+ducesnovel-viewRGBandLiDARrenderingsofurbanand materialpropertieschangeveryslowlywithwavelength.So
+indoor scenes and supports relighting, night simulations, LiDARreturnedpowercan,forexample,tellthatthealbedo
+and dynamic object insertions—achieving results that sur- ofthewallinFig2isthesameinthedarkerandlighterre-
+passcurrentstate-of-the-artmethodsinbothscene-levelur- gions. WeshowthatLiDARintensityisapowerfulcuethat
+baninverserenderingandLiDARsimulation. disentanglesmaterialpropertiesandilluminationeffectsin
+waysthatcomplementSOTAmethodsforRGBdata.
+5202
+luJ
+32
+]VC.sc[
+1v31671.7052:viXra
+struggle with dynamic environments. In contrast, we use
+LiDAR intensity as a powerful cue to material properties
+andourmethodoperatesindynamicenvironments.
+Sun Casted No Shadow in LiDAR Simulation generates synthetic LiDAR data
+Shadow in RGB LiDAR
+from existing observations to create new views or coun-
+terfactual scenarios. Geometry simulation has been tack-
+led using point clouds [22], surfels [27], NeRF [14, 34–
+Bias in RGB-only Albedo
+Estimate (RGB<->X) 36, 44, 47, 48], and 3DGS [1, 6] as scene representations.
+Over-exposure Uniform Intensity
+Region in RGB in LiDAR Intensity simulation methods rely on lookup tables [7, 27]
+orencodedintensityfields[1,14]. Manyapproachesmimic
+LiDAR ray-drop characteristics, but neglect the physics of
+LiDAR reflectance. In contrast, we show powerful infer-
+encescanberootedinthisphysics; further,weshowclose
+Figure2.Keyinsight:LiDARreflectanceislessaffectedbyenvi-
+attention to LiDAR physics produces better simulations.
+ronmentallightingthancolorimages,makingitanexcellentcom-
+WorkthatmodelsLiDARreflectionempirically[37–39,46]
+plementforinversegraphics. Top: Castshadowsincolorimages
+assumesLambertiansurfaces. Incontrast,weofferanovel
+donotappearinLiDARreflectance;Bottom:anoverexposedyel-
+formulation incorporating a specular term. Current meth-
+lowwallshowsuniformreflectanceintheLiDARspectrum.
+ods produce sparse maps. In contrast we show that joint
+LiDAR-RGBinferenceresultsindense,accuratemaps.
+InvRGB+Lisanovelinverserenderingframeworkthat
+reconstructs large, relightable, and dynamic scenes from a
+3.Physics-basedLiDARReflectanceModel
+single RGB+LiDAR sequence. InvRGB+L infers geome-
+try, illumination, and materials using LiDAR intensity ob- LiDARfollowstherenderingequation[17]andweassume
+servationswithcolorimagestogether,exploitingtwonovel noinoroutscattering,sothereflectedradianceis:
+technical contributions: (1) a physics-based LiDAR re-
+(cid:90)
+flectancemodelthat—unlikeconventionalreflectancemod-
+L (x,ω )= f (x,ω ,ω )L (x,ω )(n·ω )dω , (1)
+els—explicitly accounts for surface specularity, and (2) a r o r i o i i i i
+Ω
+joint RGB–LiDAR material consistency loss that models
+the relationship between visible and LiDAR’s infrared ob- where x is the surface point, n is the surface normal, ω i
+servations. and ω o are incident and outgoing ray directions, L i is the
+incidentradiance,andf istheBRDFatx.
+Experiments show that our model produces novel-view r
+LiDAR pulses are narrow and directional, so L (x,ω )
+RGB and LiDAR renderings for both urban and indoor i i
+canbemodelledasaconstantvalueinaverynarrowbeam
+scenes accurately while also supporting realistic relight-
+around ω (Fig. 3 middle). Energy disperses, so the ra-
+ing, nightsimulations, anddynamicobjectinsertions. Our 0
+method surpasses current state-of-the-art approaches in
+diance at x will be L
+i
+(x,ω
+i
+) ∝ P
+d2
+e, where P
+e
+is the
+emitted power and d is the distance to x. The returned
+scene-levelurbaninverserenderingandnovel-viewLiDAR
+beam is narrow and the sensor responds to radiance, so
+simulationinqualitativeandquantitativecomparisons.
+the sensor response is given by I(x,ω ) ∝ L (x,ω ) ∝
+o r o
+2.RelatedWorks
+f
+r
+(x,ω
+o
+,ω
+o
+)Pe
+d
+c
+2
+osθ,whereθ istheanglebetweenω
+i
+and
+n.
+Inverse Rendering recovers scene properties like geome- Existingmodels[14,27,37,39]assumeLambertian(dif-
+try [13, 41], materials [10, 28], and lighting [29, 40, 51] fuse) surfaces, where f r (x,ω o ,ω o ) is constant ρ lidar /π,
+fromsensordata. Light-surfaceinteractionsmaketheprob- making I ∝ ρlidar d P 2 ecosθ, where ρ lidar represents the sur-
+lemwildlyambiguous. Data-drivenmethodsusedensepre- facereflectance(LiDARalbedo).However,thismodelfails
+diction networks [3, 31, 49, 53, 55] and diffusion models to explain many real-world phenomena, such as the spot-
+[11,19,23,50]topredictintrinsicproperties. Theabsence light reflectance on metallic surfaces (e.g., cars) and water
+of an explicit physical model can result in unrealistic out- foundations.
+comes. Physics-basedmethodsleverage3Drepresentations WeextendtheLiDARreflectancemodelbyincorporat-
+likeNeRF[2,4,15,25,43,45,54]or3D-GS[5,12,24,32] ingtheCook-TorranceBRDF[9],sof r = f d +f s ,where
+to model geometry, then use differentiable PBR rendering f d = ρli π dar is the diffuse term, and f s is the specular
+toinfermaterialsandlighting. Ambiguitiesremain,sopri- term. Surface roughness τ and angle θ interact, yielding
+orsareneededtoconstrainthesolutionspace. f
+F0τ2min(1,2cos2θ)
+, with fresnel term F = 0.04.
+s4πcos2θ(cos2θ(τ2−1)+1)2 0
+There exist methods that incorporate LiDAR cues [30, Thisspecularcomponentisaspecialcaseofthemicrofacet
+43],butthesedonotexploitLiDARintensity. Allmethods model,assumingthesameincidentandoutgoingrayangles.
+Dynamic 3DGS Scene Graph LiDAR Rendering Rendered Output & Losses
+Normal Incident Ray
+Relightable Gaussian LiDAR Outgoing Ray
+Vanilla Gaussian Roughness & Color/LiDAR Albedo
+Static Node Sky Node Gbg
+T1(t) T2(t) T3(t) Camera Rendering
+Dy N n o a d m e ic Gd1 Gd2 Gd3 Normal
+O
+In
+u
+c
+t
+id
+g
+e
+o
+n
+in
+t
+g
+R
+R
+a
+a
+y
+y
+Camera
+Gaussian Point with Color Albedo
+&
+yrtemoeg
+naissuag
+erahS
+ssenhguor
+ecafrus
+Input Observation
+Fidelity loss Input Color
+Rendered Color Rendered LiDAR
+Input LiDAR
+LiDAR-Color Diffusion-based Gaussian Point with LiDAR Albedo Consistency Prior Loss
+Diffusion Prior Color Albedo Rendered Normal
+RGB <-> X Material
+LiDAR Albedo Rendered Material
+Inferred Normal
+Figure3. Overallarchitecture. Werepresentthesceneasadynamic,relightable3DGSscenegraph,consistingofastaticnodeforthe
+background,asetofdynamicnodesformovableobjects,andaskynodetomodelillumination. OurscenecangeneraterealisticLiDAR
+andcamerafootageviaphysicallybasedforwardrenderingmodules. Sceneparametersareinferredthroughaninverserenderingprocess
+using backpropagation, minimizing discrepancies between rendered results and observations (as well as priors) while maximizing self-
+consistency. orangearrow: forwardrenderingprocess; grayarrow: diffusion-basednormalandmaterialpriorinference; redarrow:
+backpropagationforinverserendering;greenarrow:losscomputation.
+Substitutionyields: 4.1.RelightableSceneRepresentation
+(cid:32) (cid:33) Dynamic Scene Graph We use a dynamic scene graph
+F τ2min(1,2cos2θ) P cosθ
+I ∝ ρ + 0 e . S, where movable objects and backgrounds are explicitly
+lidar 4cos2θ(cos2θ(τ2−1)+1)2 πd2
+representedasgraphnodes. Therepresentationisbuiltout
+(2) ofGaussianprimitivesasin3D-GS.Eachprimitiveg(x)is
+Byexplicitlymodelingspecularity, ourLiDARreflectance defined by g(x) = e−1 2 (x−µ)TΣ−1(x−µ), where x ∈ R3
+is a 3D coordinate, µ ∈ R3 stands for the mean of the
+model aligns with commonly used RGB-based shading
+Gaussian, and Σ ∈ R3×3 is the covariance matrix. We
+models,enablingaunifiedframeworkforjointLiDARand
+initializethe3DmeanswithLiDARpointsforaccuratege-
+RGB inverse rendering in the following section. Refer to
+ometry. Incontrast, previouswork[15,25,43]focuseson
+thesupplementarymaterialfordetails.
+staticscenes.
+4.Method The background (eg roads and buildings) is modelled
+withasetofstaticGaussiansG . Movingobjectsarerep-
+bg
+Werecoverarelightable4Dscenerepresentationthaten- resentedwithdynamicnodes{G′,G′,...,G′ },whereN
+1 2 N
+codes geometry, color, LiDAR reflectance, and an HDR is the number of objects. Each object is represented as a
+illumination model from an input video sequence {C t ∈ 3D-GSinitslocalcoordinatesystem. Toplacetheminthe
+RW×H×3}T t=0 , LiDAR sequences {P t ∈ RN×3}T t=0 with dynamic scene, we apply a pose transformation T k (t) ∈
+intensitymaps{I t ∈ RW×H×3}T t=0 ,andtheircorrespond- SE(3), where k is the object index and t is the times-
+ingposes{ξ t ∈ SE(3)}T t=0 capturedunderasingleillumi- tamp. The transformed Gaussian set is then formulated as
+nation environment. We represent the scene as a dynamic G (t)=T (t)·G′.
+k k k
+scene graph where each node is a 3D Gaussian encoding
+geometry,opacity,andintrinsicmaterialpropertiesforboth
+LiDAR and camera modalities (Sec. 4.1). Forward ren- IlluminationModel Wemodeltheskynodewithspher-
+dering produces RGB imagery and LiDAR intensity maps ical harmonic (SH) illumination to approximate the global
+from a camera pose, a scene graph and a physical model lightingfromtheskydome. Weparameterizelightingwith
+(Sec. 4.2). Inference adjusts scene parameters to produce SH coefficients up to 3rd-order L ∈ R16×3, and define
+sky
+renderingsthatarelikeobserveddata;ourinferenceproce- theskylightingfromincidentdirectionω asL (ω).Sky
+i sky i
+dure introduce a novel albedo-consistency loss that syner- lightingfailstomodelsharpshadows. Additionally,weuse
+gizesRGBandLiDARcuesforjointreasoning(Sec.4.3). a learnable sun light L = {ω ,I } to explicitly
+sun sun sun
+ThearchitectureispresentedinFig. 3. model directional sunlight, where ω is the sunlight di-
+sun
+rectionandI isthesunlightintensity. LiDAR Rendering Given the reflectance parameter
+sun
+ρ andtheLiDARreflectancemodelinEq.2,wecom-
+lidarj
+Relightable Gaussian Each of our 3D Gaussian primi- pute the intensity value for each Gaussian. Since LiDAR
+tives is associated with intrinsic parameters, enabling ge- sensinginvolvesasingleincidentray—thelaseritself—no
+ometryandmaterialestimationduring3D-GSoptimization.
+samplingisrequired.TheintensityIforaGaussianisgiven
+We adopt the Cook-Torrance BRDF for RGB image ren- byEq. 2,wheredandω o representthedistanceanddirec-
+dering (as in the LiDAR reflectance model), so the BRDF tion from the LiDAR origin to the Gaussian center µ, and
+parametrizationisf r (µ,ω i ,ω o ;n,ρ rgb ,τ),whereparame- cosθ = n·ω o .WeassumethatthelaserenergyofeachLi-
+t a e l r b s ed a o re ) : ; a n nd ∈ τ S ∈ 2 ( [ s 0 u , r 1 fa ] c ( e su n r o fa rm ce al r ) o ; u ρ g r h g n b es ∈ s). [0, S 1 u ] r 3 fa ( c d e iff n u o s r e - D de A r R bo c t h h a t n h n e e i l n i t s en ca si l t i y br m at a e p d, ˆI se a t n t d in t g he P e re = fle 1 c . ta F n i c n e al m ly a , p w B e l r i e d n ar -
+mal and surface roughness will be the same at visible and intoimagespace,definingtheLiDARrenderingprocessas:
+LiDAR wavelengths, but diffuse albedo may not be. We render lidar (S)={ˆI,B lidar }.
+denote LiDAR albedo in the physical reflectance model as
+4.3.InverseRenderingwithRGB+L
+ρ ∈ [0,1]. ForeachGaussianprimitiveg(x),thesepa-
+lidar
+rametersareassociatedtomodelthematerialproperties,so: Problem Formulation We must infer scene parameters
+g ={µ,Σ,c,α,n,ρ ,τ,ρ }. – geometry, material properties, illumination, and LiDAR
+rgb lidar
+The entire scene representation at timestamp t is then reflectance–frombothRGBandLiDARdata. Theoverall
+S={G ,G (t),L ,L }. lossfunctionforoptimizingthescenegraphSis:
+bg k sky sun
+4.2.Physics-basedForwardRendering minL +L +L +L +L +L
+lidar rgb nor mat rgb→lidar lidar→rgb
+S (cid:124) (cid:123)(cid:122) (cid:125) (cid:124) (cid:123)(cid:122) (cid:125) (cid:124) (cid:123)(cid:122) (cid:125)
+Physics-basedforwardrenderingofthesceneservesasthe fidelity diffusionprior rgb−lidarconsistency
+foundationforinversemodelingtoestimatesceneparame- (3)
+ters and supports downstream applications such as relight-
+FidelitylossesforLiDARandRGBare:
+ingandinsertionrendering.
+L =∥Cˆ −C∥2, L =∥(ˆI−I)·M ∥2 (4)
+rgb 2 lidar lidar 2
+Camera Rendering We adopt a BVH-based ray tracer
+[12], denoted as Tracer(·) to trace the visibility for each where C is the ground-truth image and M lidar is a mask
+Gaussian. For an incident direction ω , the visibility toaccountforsparsenessinLiDARintensityobservations.
+i
+v(ω) = Tracer(ω;S) indicates whether the Gaussian re- Themaskisobtainedbythresholding.
+i i
+ceives direct illumination from the sky. If a ray from
+g toward ω intersects another object before reaching the Diffusion-basedPrior Wemitigatetheambiguityinma-
+i
+sky dome, v(ω) = 0; otherwise, it is directly lit, and terial inference by using monocular geometric and mate-
+i
+v(ω) = 1. However, inurbanscenes, restrictingraytrac- rial cues from pre-trained models. We use Geowizard[11]
+i
+ing to only visible objects can lead to incomplete shadow- and RGB-X[50] to preprocess multi-view training images,
+ing, asoccludedobjectsoutsidethefieldofviewmayalso extracting pseudo normal and material labels, written Nˆ
+cast shadows. To address this, we introduce an sun visi- and Mˆ = {Bˆ ,Rˆ} respectively. These guide inference
+rgb
+bilityparameterv foreachg,whichindicateswhethera throughlosses:
+sun
+GaussianisdirectlylitbysunlightL fromdirectionω .
+sun sun
+The PBR color for each Gaussian primitive can L nor =∥N−Nˆ∥2 2 , L mat =∥M−Mˆ∥2 2 . (5)
+be computed using the rendering equation. We em-
+ploy Monte Carlo sampling to generate M incident RGB-LiDAR Albedo Consistency Loss Spectral re-
+ray directions. Consequently, the estimated PBR flectance (which affects RGB images) and LiDAR albedo
+color ˆc of a Gaussian primitive g for view direc- arestronglyspatiallycorrelatedbecauseeachisanepiphe-
+tion ω is: ˆc(ω ) = 1 (cid:80)M [v I (ω · n) + nomenonofmaterialmicrostructure(seealso[21,26]).Sur-
+o o M i=1 sun sun sun
+v(ω)f (µ,ω,ω ;n,ρ ,τ )L (ω)cosθ]. The first faces with similar spectral reflectance will tend to have
+i r i o rgb rough sky i
+term is the sunlight while the second term is the incident similar LiDAR albedo and vice versa. We introduce two
+lighting from the sky dome. We then render the scene consistencyconstraintsthatenforcethecorrelationbetween
+graph S into the image space through α-blending as Cˆ = albedoandreflectance.
+(cid:80) (cid:81)
+αˆc (1 − α ). Additionally, we render all the LiDARintensitymapsareinherentlysparseandincom-
+j j j k<j k
+attributes into corresponding maps (e.g., normal map N, plete,butspectralreflectanceisadensesignal. Weenforce
+albedo map B , roughness map R ) using α-blending. a neighborhood smoothness constraint that propagates the
+rgb
+The camera rendering results of scene graph S are defined sparseLiDARalbedovaluesintoadensemapB ,under
+lidar
+as: render (S)={Cˆ,N,B ,R}. theassumptionthatitshouldexhibitsimilarsmoothnessas
+rgb rgb
+thereflectancemapB . Specifically,weadoptabilateral Input RGBX Ours
+rgb
+smoothnessloss:
+(cid:88)
+L = |B −B |·w(B ,B ),
+rgb→lidar lidarp lidarq rgbp rgbq
+q∈N(p)
+(6)
+Here, p and q denote indexes of neighboring pixels, and
+the weighting function is given by w(B ,B ) =
+rgbp rgbq
+exp
+(cid:16)
+−
+(Brgbp −Brgbq
+)2(cid:17)
+. σisahyperparametercontrolling
+σ2
+the sensitivity to spectral reflectance differences, ensuring
+Figure4.OurestimatedspectralreflectancevsRGB↔X.Com-
+smooth propagation of reflectance while preserving mate-
+pared to the latest generative diffusion prior [50], our estimated
+rialboundaries.
+spectralreflectancebetterreflectsthevehicle’spaintcolorandis
+LiDAR albedo estimates are independent of external
+morerobusttocastshadows.
+lightingconditions,soareapowerfulcueforcorrectinger-
+rors in reflectance estimates caused by lighting. Assume
+Input w/o Consistency Loss w/ Consistency Loss
+surfaces with similar albedo will have similar spectral re-
+flectance; then we can impose a regional consistency on
+spectralreflectanceby:
+(cid:88)
+L = var(B |B ), (7)
+lidar→rgb rgbΩ lidarΩ
+Ω
+where Ω is a set of regions operating as superpixels (ob-
+tained using SAM [18]) within the LiDAR albedo map
+B . B and B denote the sets of spectral re-
+lidar rgbΩ lidarΩ
+flectanceandalbedovalueswithinthesameregionΩ.
+Optimization We use a two-stage optimization process.
+Inthefirststage,wesupervisethescenegraphwithoutthe
+consistencylosstoobtaintheinitialGaussians(onlygeom-
+etry, opacity and non-relightable colors) and scene graph
+topology. In the second stage, we fix the geometry and
+opacity of the Gaussians, and refine the intrinsic material
+propertiesandlightingthroughjointoptimization. Forde- Figure5.TheRGB-LiDARconsistencylosscorrectssignificant
+tailspleaserefertothesupplementarymaterials. errors.OurproposedRGB-LiDARconsistencylossimprovesthe
+robustnessofsurfacereflectanceestimation. Ineachpairofrows,
+5.Experiment top is spectral reflectance, bottom is LiDAR albedo. The cast
+shadow in the top pair is fixed, as is the color error around the
+5.1.ExperimentProtocols
+laserprinterinthesecondpair.
+Datasets We conduct experiments on the Waymo Open
+Dataset [33], which provides RGB images from five cam-
+5.2.ComparisonwithSOTAmethods
+eras and 64-beam LiDAR data (including intensity). uring
+training,weuseonlyonecameraanditscorrespondingLi- Inverse Rendering We compare our method against Ur-
+DARsequence. Sinceeachsceneisrecordedonlyonce,the banIR[25]andFEGR[43],twostate-of-the-artapproaches
+dataset does not support quantitative relighting evaluation. for urban scene inverse rendering. Since the Waymo
+To address this, we collected an additional driving scene dataset does not provide ground-truth intrinsic labels, we
+recordedatdifferenttimesoftheday,capturingvaryingil- present only qualitative comparisons in Fig. 6, using
+lumination conditions. We also captured an indoor scene baseline results provided by the authors of UrbanIR. Our
+underanartificiallightingenvironmenttoverifytheeffec- method achieves superior inverse rendering by leveraging
+tivenessofouralbedo-reflectanceconsistency. reflectance to effectively disentangle shading from albedo,
+resulting in smoother albedo estimates. In contrast, both
+Evaluation Metrics For image comparisons, we use UrbanIR and FEGR struggle to separate shadows cast by
+PSNR, SSIM [42], and LPIPS [52]. For LiDAR intensity lighting poles and those beneath vehicles from the albedo,
+simulation,weevaluateusingRMSE. resultinginunrealisticshadowsbesidethecarintherelight-
+tupnI
+gnithgileR
+odeblA
+lamroN
+ssenhguoR
+FEGR UrbanIR Ours FEGR UrbanIR Ours
+Figure6. QualitativecomparisonforinverserenderingwithFEGRandUrbanIRonWaymodataset. FEGRproducesunrealistic
+normalestimatesandbakeshardshadowsintothealbedo. UrbanIR’shasnodenseroughnessestimation,anditsradiance-basedshadows
+causerelightingartifacts(seerow2,column5). Incontrast,ourmethodachievesaccurateandplausiblematerialandgeometryestimates,
+yieldingsuperiorrelighting. Noticealsotheimprovedqualitative“realism”inrelightingfigures; surfacestendtolookmorelikeactual
+objectsurfaces, andlesslikecomputergraphicsitems, likelyaconsequenceofourroughnessmodel. BothFEGRandourmethoduse
+LiDAR,whileUrbanIRreliessolelyonvideoinput.
+Method PSNR↑ SSIM↑ LPIPS↓ place the illumination parameters of the 9 AM scene with
+those from the 1 PM scene. Table 1 presents the quanti-
+UrbanIR[25] 28.84 0.67 0.49
+tative results, where our method significantly outperforms
+w/oL 29.97 0.73 0.34 UrbanIR. Additionally, incorporating the consistency loss
+lidar→rgb
+Ours 30.42 0.72 0.30 furtherenhancesperformance,primarilyduetomoreaccu-
+ratematerialestimation.Fig.7showsthequalitativeresults,
+Table1.Quantitativeresultsforrelighting. highlighting noticeable light and shadow shifts on road
+signsanddistantbuildings. Incontrast, UrbanIRstruggles
+to adjust the lighting. This demonstrates that our frame-
+ingresultsofthefirstscene. Additionally,wecompareour workeffectivelydisentanglesilluminationfromalbedo,en-
+albedoestimationwithRGB-X[50]inFig. 4,whichserves ablingaccuratemodelingofshadingvariationsunderdiffer-
+asthediffusion-basedpriorforourframework.RGB-Xsuf- entlighting.
+fersfrommulti-viewinconsistencyandfailstorecoverthe
+albedoofcars. Incontrast,ourintrinsic3DGaussianrepre-
+sentation is inherently multi-view and time-consistent, en- LiDAR Simulation To validate the effectiveness of our
+ablingittocorrecterroneouspredictionsduringtraining. LiDARintensityformulationandtheaccuracyofthegener-
+atedintensity,weevaluatenovelviewsynthesisforLiDAR
+intensityontheWaymoDataset. Wecompareourapproach
+Relighting For quantitative evaluation, we use data cap- against a series of LiDAR simulation works including Li-
+tured under different lighting conditions. Specifically, we DARSim[27],PCGEN[22],AlignMiF[35]andNFL[14].
+recordasceneat9AMand1PMonthesameday,trainboth Following[14],weconductexperimentsonfourscenes,us-
+sequencesindependentlyusingourframework,andthenre- ing50framesfromeachsequencefortrainingandselecting
+Input at 9am GT target at 1pm UrbanIR Ours UrbanIR Ours
+NVS at 9am Relighting at 1pm
+Figure7. Qualitativeresultsforrelighting. Byreplacingtheilluminationofthe9AMscenewiththatofthe1PM,wecansuccessfully
+shadethetreeandbuildings.
+Intensity-RMSE↓ Method PSNR↑ SSIM↑ LPIPs↓
+SceneID w/oLiDAR 33.35 0.89 0.13
+Average
+Method 1 2 3 4 w/oDynamic 29.13 0.83 0.21
+LiDARsim[27] 0.12 0.13 0.09 0.14 0.120 Ours 34.76 0.91 0.11
+PCGEN[22] 0.11 0.15 0.09 0.15 0.125
+AlignMiF[35] 0.05 0.10 0.05 0.09 0.073 Table3.Ablationstudiesonrenderingquality.Thehighlighted
+NFL[14] 0.06 0.13 0.05 0.08 0.080 metricsdenoteBest. BothLiDARreflectanceanddynamicmod-
+elingimprovereconstructionquality.
+Ours 0.06 0.08 0.05 0.06 0.063
+Table2.QuantitativeresultsfornovelviewsynthesisofLiDAR DynamicSceneGraph Weconductanablationstudyto
+intensityontheWaymoOpenDataset. Thehighlightedmetrics
+assess the effectiveness of the dynamic scene graph by re-
+denoteBestandSecondBest. Theproposedmethodachievesthe
+movingthedynamicnodesandtrainingastaticsetofGaus-
+bestresultsoverall.
+sians on dynamic video input. Tab. 3 presents the quan-
+titative results for the reconstruction of PBR images on a
+dynamic scene in the Waymo Dataset. Besides, Fig. 8
+every5thframeforvalidation. WeuseRMSEastheevalu-
+presentstheestimatedalbedoandroughness. Asshownin
+ationmetricforintensity. Table2presentsthequantitative
+the figure, without the dynamic scene graph, the moving
+results,whereourmethodachievesthelowestRMSE,out-
+car exhibits aliasing artifacts due to the inability to model
+performingallbaselines.Thisdemonstratesthatourformu-
+motion. Incontrast,ourapproacheffectivelycapturestime-
+lationeffectivelycapturestheunderlyingphysicalphenom-
+varyingintrinsicpropertiesandhandlesthechangingshad-
+ena,leadingtomoreaccurateLiDARintensitymodeling.
+owsbeneaththecar,enablingrobustinverserenderingfrom
+5.3.AblationStudies dynamicvideoinput.
+RGB-LiDARConsistencyLoss Fig. 5showsqualitative
+comparison of inferred spectral reflectance with and with- LiDAR Input To evaluate the impact of LiDAR data on
+outconsistencyloss. Consistencyremovesshadows: The our framework, we conduct an ablation study where only
+shadows of the light pole are incorrectly embedded into RGBimagesareused. Specifically,wedisabletheLiDAR-
+thespectralreflectance(firstrow)whenconsistencyisnot based initialization of 3D-GS and exclude the albedo con-
+applied. The consistency loss recovers the road correctly. sistency loss term from the optimization. The reconstruc-
+Consistency improves LiDAR albedo: The upper part of tionperformanceisreportedinTable3. Whileinverseren-
+theimagesinthesecondrowismissingLiDARalbedoes- dering can still be performed without LiDAR sequence as
+timates when consistency is not applied, because the ele- inputs,thequalityofphysicallybasedrendering(PBR)im-
+vation range of the sensor is limited. The consistency loss agesexhibitsanotabledecrease. Thisstudyhighlightsthe
+propagatesinformationfromthespectralreflectanceeffec- crucialroleofLiDARinenhancingbothgeometricfidelity
+tively propagated, filling in the missing bits. Consistency andinverserenderingaccuracy.
+fixeslightinginducederrors:Theindoorsceneofthethird
+5.4.DownstreamApplications
+row shows a standard problem with estimating RGB spec-
+tralreflectancefromimages: spatiallyfastchangesinillu- Scene Editing Fig. 9 presents the scene editing results,
+minantbaffleallintrinsicimagemethods,sosomelighting showingtheversatilityofourmethodinbothrelightingand
+effects get “baked” into results. The consistency loss sig- object insertion. In the first row, we demonstrate night-
+nificantlyimprovestheaccuracyofthealbedoestimation. time simulation with streetlight and headlight illumination
+Input w/o Dynamic Scene Graph w/ Dynamic Scene Graph
+Figure 8. Ablation study on dynamic scene graph Explicitly modeling dynamic objects improves albedo and roughness estimation;
+otherwise,motion-blurredartifactswillbebakedintothescene.
+Input Streetlight Headlight Method Precision↑ Recall↑ mAP@50↑
+w/oNightAug. 0.537 0.281 0.236
+w/NightAug. 0.674 0.312 0.321
+Table 4. Data augmentation for nighttime object detection.
+Input Insertion w/o Relighting Insertion w/ Relighting
+Off-the-shelf object detection [16] does not perform well on
+Waymo nighttime sequences. Our night simulation generates
+nighttimelogsfromdaytimelabeledlogsatnoadditionalcost.
+Input Insertion Insertion + Scene Relighting nal object detection labels. This enables the generation of
+nighttime training data without additional manual annota-
+tions. We generate 100 nighttime images with a total of
+121carlabelswhicharethenusedtofine-tuneaYOLO-v5
+object detection model [16]. We evaluate the model using
+50 real nighttime images from Waymo Dataset. Compar-
+Figure9. DownstreamapplicationsofourmethodTop: night ingitsperformanceagainstthebaselinewithoutfine-tuning
+simulationwithcontrollablelights;middle:insertionwith/without in Tab. 4, we demonstrate the potential to enhance night-
+relighting;bottom: insertionrenderingwith/withoutchangingthe timeperceptionforautonomousdriving,particularlyinlow-
+timeofday. visibility conditions, without the costly process of collect-
+ingandlabelingnighttimedata.
+toaninputdaytimescene. Additionally, wepresentobject
+6.LimitationandDiscussion
+insertion results. Unlike previous approaches [25], which
+relyonoff-the-shelfrenderingengineslikeBlender[8],we
+In this work, we integrate LiDAR into inverse rendering
+candirectlytransferatraineddynamicnodefromonescene
+and introduce InvRGB+L, novel model capable of recon-
+to another and relight the node using our framework. The
+structinglarge-scale,relightable,anddynamicscenesfrom
+secondrowshowstheresultwithoutrelightingtheinserted
+asingleRGB+LiDARsequence. Byleveragingtheconsis-
+node: the inserted carappears mismatchedwith the scene.
+tency between LiDAR and RGB albedo, our approach en-
+In contrast, with relighting, the car blends seamlessly into
+hances material estimation and enables a variety of scene
+theenvironment. Thethirdrowshowstheresultsofrelight-
+editing applications, including relighting, object insertion,
+ingboththesceneandtheinsertedobjectsimultaneously.
+and nighttime simulation. However, there are still limita-
+tions. First,weadoptaBVH-basedraytracerfor3DGaus-
+NighttimeDataAugmentationforObjectDetection To sianraytracing,whichcanproduceinaccurateshadowsdue
+evaluate the applicability of our method in autonomous totheopacitypropertiesofGaussianprimitives. Addition-
+driving perception, we conduct an experiment leveraging ally, our illumination model, which accounts for only sky-
+our method for nighttime data augmentation. Specifically, lightandsunlight,isnotsufficientforinverserenderingon
+wetransformdaytimeimagesequencesintonighttimecon- complexenvironmentssuchasnighttimescenes,whichwe
+ditions using our framework while preserving the origi- willtrytoaddressinthefuture.
+References oftheIEEE/CVFInternationalConferenceonComputerVi-
+sion,pages18236–18246,2023. 2,6,7
+[1] QifengChen,ShengYang,SicongDu,TaoTang,PengChen,
+[15] HaianJin,IsabellaLiu,PeijiaXu,XiaoshuaiZhang,Song-
+andYuchiHuo. Lidar-gs: Real-timelidarre-simulationus-
+fang Han, Sai Bi, Xiaowei Zhou, Zexiang Xu, and Hao
+ing gaussian splatting. arXiv preprint arXiv:2410.05111,
+Su. Tensoir: Tensorialinverserendering. InProceedingsof
+2024. 2
+theIEEE/CVFConferenceonComputerVisionandPattern
+[2] Xiaoxue Chen, Junchen Liu, Hao Zhao, Guyue Zhou, and
+Recognition,pages165–174,2023. 2,3
+Ya-QinZhang. Nerrf: 3dreconstructionandviewsynthesis
+[16] Glenn Jocher, Alex Stoken, Jirka Borovec, Liu Changyu,
+for transparent and specular objects with neural refractive-
+AdamHogan,LaurentiuDiaconu,JakePoznanski,LijunYu,
+reflectivefields. arXivpreprintarXiv:2309.13039,2023. 2
+PrashantRai,RussFerriday,etal. ultralytics/yolov5: v3.0.
+[3] XiaoxueChen,YuhangZheng,YupengZheng,QiangZhou,
+Zenodo,2020. 8
+HaoZhao,GuyueZhou,andYa-QinZhang. Dpf: Learning
+[17] James T. Kajiya. The rendering equation. In Proceedings
+densepredictionfieldswithweaksupervision. InProceed-
+of the 13th Annual Conference on Computer Graphics and
+ingsoftheIEEE/CVFConferenceonComputerVisionand
+Interactive Techniques (SIGGRAPH ’86), pages 143–150.
+PatternRecognition,pages15347–15357,2023. 2
+ACM,1986. 2
+[4] XiaoxueChen,HaoZhao,GuyueZhou,andYa-QinZhang.
+[18] AlexanderKirillov,EricMintun,NikhilaRavi,HanziMao,
+Time-conditionedilluminationforinverserenderingofout-
+ChloeRolland,LauraGustafson,TeteXiao,SpencerWhite-
+doorscenes. 2024. 2
+head,AlexanderCBerg,Wan-YenLo,etal. Segmentany-
+[5] Xiaoxue Chen, Jv Zheng, Hao Huang, Haoran Xu, Wei-
+thing.InProceedingsoftheIEEE/CVFinternationalconfer-
+haoGu,KangliangChen,Huan-angGao,HaoZhao,Guyue
+enceoncomputervision,pages4015–4026,2023. 5
+Zhou,YaqinZhang,etal.Rgm:Reconstructinghigh-fidelity
+[19] PeterKocsis,VincentSitzmann,andMatthiasNießner. In-
+3dcarassetswithrelightable3d-gsgenerativemodelfroma
+trinsic image diffusion for indoor single-view material es-
+singleimage. arXivpreprintarXiv:2410.08181,2024. 2
+timation. In Proceedings of the IEEE/CVF Conference
+[6] Ziyu Chen, Jiawei Yang, Jiahui Huang, Riccardo de Lutio,
+on Computer Vision and Pattern Recognition, pages 5198–
+JanickMartinezEsturo,BorisIvanovic,OrLitany,ZanGo-
+5208,2024. 2
+jcic, SanjaFidler, MarcoPavone, etal. Omnire: Omniur-
+banscenereconstruction. arXivpreprintarXiv:2408.16760, [20] KenjiKoide,ShujiOishi,MasashiYokozuka,andAtsuhiko
+Banno.General,single-shot,target-less,andautomaticlidar-
+2024. 2,12
+camera extrinsic calibration toolbox. In 2023 IEEE Inter-
+[7] Yi-TingCheng, Yi-ChunLin, andAymanHabib. General-
+national Conference on Robotics and Automation (ICRA).
+izedlidarintensitynormalizationanditspositiveimpacton
+IEEE,,2023-5-29. 11
+geometric and learning-based lane marking detection. Re-
+moteSensing,14(17):4393,2022. 2 [21] E.L. Krinov. Spectral reflectance properties of natural for-
+mations. Technical report, National Research Council of
+[8] BlenderOnlineCommunity. Blender—a3dmodellingand
+Canada,TechnicalTranslation:TT-439,1947. 4
+renderingpackage,2025. Version4.4. 8
+[9] Robert L Cook and Kenneth E. Torrance. A reflectance [22] Chenqi Li, Yuan Ren, and Bingbing Liu. Pcgen: Point
+modelforcomputergraphics. ACMTransactionsonGraph- cloud generator for lidar simulation. In 2023 IEEE Inter-
+ics(ToG),1(1):7–24,1982. 2,11 national Conference on Robotics and Automation (ICRA),
+pages11676–11682.IEEE,2023. 2,6,7
+[10] TimothyDDorney,RichardGBaraniuk,andDanielMMit-
+tleman. Materialparameterestimationwithterahertztime- [23] RuofanLiang,ZanGojcic,HuanLing,JacobMunkberg,Jon
+domainspectroscopy. JOSAA,18(7):1562–1571,2001. 2 Hasselgren,Zhi-HaoLin,JunGao,AlexanderKeller,Nan-
+[11] XiaoFu,WeiYin,MuHu,KaixuanWang,YuexinMa,Ping ditaVijaykumar,SanjaFidler,etal.Diffusionrenderer:Neu-
+Tan,ShaojieShen,DahuaLin,andXiaoxiaoLong. Geowiz- ralinverseandforwardrenderingwithvideodiffusionmod-
+ard: Unleashing the diffusion priors for 3d geometry esti- els. arXivpreprintarXiv:2501.18590,2025. 2
+mation from a single image. In European Conference on [24] ZhihaoLiang,QiZhang,YingFeng,YingShan,andKuiJia.
+ComputerVision,pages241–258.Springer,2024. 2,4,12 Gs-ir: 3d gaussian splatting for inverse rendering. In Pro-
+[12] JianGao,ChunGu,YoutianLin,ZhihaoLi,HaoZhu,Xun ceedingsoftheIEEE/CVFConferenceonComputerVision
+Cao,LiZhang,andYaoYao. Relightable3dgaussians: Re- andPatternRecognition,pages21644–21653,2024. 2
+alistic point cloud relighting with brdf decomposition and [25] Zhi-HaoLin,BohanLiu,Yi-TingChen,Kuan-ShengChen,
+ray tracing. In European Conference on Computer Vision, David Forsyth, Jia-Bin Huang, Anand Bhattad, and Shen-
+pages73–89.Springer,2024. 2,4 longWang.Urbanir:Large-scaleurbansceneinverserender-
+[13] JiahuiHuang,ZanGojcic,MatanAtzmon,OrLitany,Sanja ingfromasinglevideo. arXivpreprintarXiv:2306.09349,
+Fidler, and Francis Williams. Neural kernel surface re- 2023. 2,3,5,6,8
+construction. InProceedingsoftheIEEE/CVFConference [26] L.T.MaloneyandB.A.Wandell. Acomputationalmodelof
+on Computer Vision and Pattern Recognition, pages 4369– colorconstancy. J.Opt.Soc.Am,1:29–33,1986. 4
+4379,2023. 2 [27] Sivabalan Manivasagam, Shenlong Wang, Kelvin Wong,
+[14] ShengyuHuang,ZanGojcic,ZianWang,FrancisWilliams, WenyuanZeng,MikitaSazanovich,ShuhanTan,BinYang,
+YoniKasten,SanjaFidler,KonradSchindler,andOrLitany. Wei-ChiuMa,andRaquelUrtasun.Lidarsim:Realisticlidar
+Neurallidarfieldsfornovelviewsynthesis. InProceedings simulationbyleveragingtherealworld. InProceedingsof
+theIEEE/CVFConferenceonComputerVisionandPattern International Symposium on Experimental Robotics, pages
+Recognition,pages11167–11176,2020. 2,6,7 608–617.Springer,2023.
+[28] Abhimitra Meka, Maxim Maximov, Michael Zollhoefer, [39] KasiViswanath,PengJiang,andSrikanthSaripalli. Reflec-
+Avishek Chatterjee, Hans-Peter Seidel, Christian Richardt, tivityisallyouneed!: Advancinglidarsemanticsegmenta-
+andChristianTheobalt. Lime: Liveintrinsicmaterialesti- tion. arXivpreprintarXiv:2403.13188,2024. 2
+mation. InProceedingsoftheIEEEconferenceoncomputer [40] GuangcongWang,YinuoYang,ChenChangeLoy,andZi-
+visionandpatternrecognition,pages6315–6324,2018. 2 wei Liu. Stylelight: Hdr panorama generation for lighting
+[29] Pakkapon Phongthawee, Worameth Chinchuthakun, Non- estimationandediting.InEuropeanconferenceoncomputer
+taphat Sinsunthithet, Varun Jampani, Amit Raj, Pramook vision,pages477–492.Springer,2022. 2
+Khungurn, and Supasorn Suwajanakorn. Diffusionlight: [41] Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris
+Lightprobesforfreebypaintingachromeball. InProceed- Chidlovskii,andJeromeRevaud. Dust3r: Geometric3dvi-
+ings of the IEEE/CVF conference on computer vision and sionmadeeasy.InProceedingsoftheIEEE/CVFConference
+patternrecognition,pages98–108,2024. 2 onComputerVisionandPatternRecognition,pages20697–
+[30] Ava Pun, Gary Sun, Jingkang Wang, Yun Chen, Ze Yang, 20709,2024. 2
+Sivabalan Manivasagam, Wei-Chiu Ma, and Raquel Urta- [42] ZhouWang,AlanCBovik,HamidRSheikh,andEeroPSi-
+sun. Neurallightingsimulationforurbanscenes. Advances moncelli. Imagequalityassessment: fromerrorvisibilityto
+inNeuralInformationProcessingSystems,36:19291–19326, structuralsimilarity.IEEEtransactionsonimageprocessing,
+2023. 2 13(4):600–612,2004. 5
+[31] SoumyadipSengupta,JinweiGu,KihwanKim,GuilinLiu, [43] Zian Wang, Tianchang Shen, Jun Gao, Shengyu Huang,
+David W Jacobs, and Jan Kautz. Neural inverse rendering Jacob Munkberg, Jon Hasselgren, Zan Gojcic, Wenzheng
+of an indoor scene from a single image. In Proceedings Chen,andSanjaFidler. Neuralfieldsmeetexplicitgeomet-
+oftheIEEE/CVFInternationalConferenceonComputerVi- ricrepresentationsforinverserenderingofurbanscenes. In
+sion,pages8598–8607,2019. 2 ProceedingsoftheIEEE/CVFConferenceonComputerVi-
+[32] Yahao Shi, Yanmin Wu, Chenming Wu, Xing Liu, Chen sionandPatternRecognition,pages8370–8380,2023. 2,3,
+Zhao, Haocheng Feng, Jian Zhang, Bin Zhou, Errui Ding, 5
+and Jingdong Wang. Gir: 3d gaussian inverse render- [44] HanfengWu,XingxingZuo,StefanLeutenegger,OrLitany,
+ing for relightable scene factorization. arXiv preprint KonradSchindler, andShengyuHuang. Dynamiclidarre-
+arXiv:2312.05133,2023. 2 simulationusingcompositionalneuralfields.InProceedings
+[33] Pei Sun, Henrik Kretzschmar, Xerxes Dotiwalla, Aurelien oftheIEEE/CVFConferenceonComputerVisionandPat-
+Chouard,VijaysaiPatnaik,PaulTsui,JamesGuo,YinZhou, ternRecognition,pages19988–19998,2024. 2
+YuningChai,BenjaminCaine,etal.Scalabilityinperception [45] LiwenWu,RuiZhu,MustafaBYaldiz,YinhaoZhu,Hong
+forautonomousdriving: Waymoopendataset. InProceed- Cai,JanarbekMatai,FatihPorikli,Tzu-MaoLi,Manmohan
+ings of the IEEE/CVF conference on computer vision and Chandraker,andRaviRamamoorthi.Factorizedinversepath
+patternrecognition,pages2446–2454,2020. 5 tracing for efficient and accurate material-lighting estima-
+[34] TangTao,LongfeiGao,GuangrunWang,YixingLao,Peng tion. In Proceedings of the IEEE/CVF International Con-
+Chen, Hengshuang Zhao, Dayang Hao, Xiaodan Liang, ferenceonComputerVision,pages3848–3858,2023. 2
+MathieuSalzmann,andKaichengYu. Lidar-nerf: Novelli- [46] Qiong Wu, Ruofei Zhong, Pinliang Dong, You Mo, and
+darviewsynthesisvianeuralradiancefields.InProceedings Yunxiang Jin. Airborne lidar intensity correction based on
+ofthe32ndACMInternationalConferenceonMultimedia, anewmethodforincidenceanglecorrectionforimproving
+pages390–398,2024. 2 land-coverclassification. RemoteSensing,13(3):511,2021.
+[35] TangTao,GuangrunWang,YixingLao,PengChen,JieLiu, 2
+Liang Lin, Kaicheng Yu, and Xiaodan Liang. Alignmif: [47] Yunzhi Yan, Haotong Lin, Chenxu Zhou, Weijie Wang,
+Geometry-alignedmultimodalimplicitfieldforlidar-camera Haiyang Sun, Kun Zhan, Xianpeng Lang, Xiaowei Zhou,
+jointsynthesis.InProceedingsoftheIEEE/CVFConference andSidaPeng. Streetgaussians: Modelingdynamicurban
+onComputerVisionandPatternRecognition,pages21230– sceneswithgaussiansplatting. InEuropeanConferenceon
+21240,2024. 6,7 ComputerVision,pages156–173.Springer,2024. 2
+[36] Adam Tonderski, Carl Lindstro¨m, Georg Hess, William [48] Ze Yang, Yun Chen, Jingkang Wang, Sivabalan Mani-
+Ljungbergh, Lennart Svensson, and Christoffer Petersson. vasagam, Wei-ChiuMa, AnqiJoyceYang, andRaquelUr-
+Neurad: Neuralrenderingforautonomousdriving. InPro- tasun. Unisim: A neural closed-loop sensor simulator. In
+ceedingsoftheIEEE/CVFConferenceonComputerVision ProceedingsoftheIEEE/CVFConferenceonComputerVi-
+andPatternRecognition,pages14895–14904,2024. 2 sionandPatternRecognition,pages1389–1399,2023. 2
+[37] PatrikVacek,OtakarJasˇek,KarelZimmermann,andToma´sˇ [49] Ye Yu and William AP Smith. Inverserendernet: Learn-
+Svoboda. Learningtopredictlidarintensities. IEEETrans- ing single image inverse rendering. In Proceedings of
+actions on Intelligent Transportation Systems, 23(4):3556– theIEEE/CVFConferenceonComputerVisionandPattern
+3564,2021. 2 Recognition,pages3155–3164,2019. 2
+[38] KasiViswanath,PengJiang,PBSujit,andSrikanthSaripalli. [50] ZhengZeng,ValentinDeschaintre,IliyanGeorgiev,Yannick
+Off-road lidar intensity based semantic segmentation. In Hold-Geoffroy, Yiwei Hu, Fujun Luan, Ling-Qi Yan, and
+Milosˇ Hasˇan. Rgb-x: Image decomposition and synthesis experiments by teleoperating the robot inside an academic
+usingmaterial-andlighting-awarediffusionmodels. InSpe- building.
+cial Interest Group on Computer Graphics and Interactive
+Techniques Conference Conference Papers ’24, page 1–11.
+ACM,2024. 2,4,5,6,12
+[51] Fangneng Zhan, Changgong Zhang, Yingchen Yu, Yuan
+Chang, Shijian Lu, Feiying Ma, and Xuansong Xie. Em-
+light:Lightingestimationviasphericaldistributionapproxi-
+mation. InProceedingsoftheAAAIConferenceonArtificial
+Intelligence,pages3287–3295,2021. 2
+[52] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shecht-
+man, and Oliver Wang. The unreasonable effectiveness of Figure10. ThetwoLiDAR-camerasystemsusedfordatacollec-
+deep features as a perceptual metric. In IEEE Conference tion.Theleftisforoutdoor,andtherightisforindoor.
+onComputerVisionandPatternRecognition(CVPR),pages
+586–595,2018. 5
+[53] Jingsen Zhu, Fujun Luan, Yuchi Huo, Zihao Lin, Zhihua A.2.LiDARIntensityRevealsSpecularity
+Zhong,DianbingXi,RuiWang,HujunBao,JiaxiangZheng,
+andRuiTang. Learning-basedinverserenderingofcomplex We verify that LiDAR intensity can indicate surface spec-
+indoorsceneswithdifferentiablemontecarloraytracing. In ularity by collecting real-world data of a diffuse wall and
+SIGGRAPHAsia2022ConferencePapers,pages1–8,2022. aspecularwhiteboard. InFig.11,thespecularwhiteboard
+2 has a high intensity only around the center of the image
+[54] JingsenZhu,YuchiHuo,QiYe,FujunLuan,JifanLi,Dian- wheretheLiDARbeamsareparalleltothesurfacenormal
+bingXi,LishaWang,RuiTang,WeiHua,HujunBao,etal. ofthewhiteboard. Sinceitisaspecularsurface,thosepar-
+I2-sdf: Intrinsicindoorscenereconstructionandeditingvia allel LiDAR beams are reflected back at the same angle,
+raytracinginneuralsdfs. InProceedingsoftheIEEE/CVF
+straight into the sensor, and the LiDAR receiver gets the
+Conference on Computer Vision and Pattern Recognition,
+strongest signal/highest intensity in that region. The dif-
+pages12489–12498,2023. 2
+fusewall,however,showsnomajorintensitydifferenceand
+[55] Rui Zhu, Zhengqin Li, Janarbek Matai, Fatih Porikli, and
+isroughlyuniformacrossalltheLiDARpointssinceitre-
+ManmohanChandraker.Irisformer:Densevisiontransform-
+flectslightinalldirections.
+ersforsingle-imageinverserenderinginindoorscenes. In
+ProceedingsoftheIEEE/CVFConferenceonComputerVi- InFig.12,weshowthiscontinuestoholdtrueatvarying
+sionandPatternRecognition,pages2822–2831,2022. 2 distances and reflectance angles. We recorded a sequence
+ofdatascanningbothobjectsandaccumulatedtheintensi-
+tiesforpointscorrespondingtoeachone. Forthespecular
+A.Appendix
+whiteboard, the highest intensity LiDAR points are clus-
+A.1.CustomDataCollection tered around θ = 3.14, when the LiDAR ray and surface
+normal are parallel. But for the diffuse wall, the intensity
+WerecordeddataourselvesusingtwoLiDAR-camerasys-
+isroughlyspreadoutasexpected. ThisshowshowLiDAR
+tems(shown in Fig. 10) to enable our outdoor quantitative
+intensitycanbeavaluablecuetodeterminespecularity.
+relighting evaluation and indoor albedo-reflectance exper-
+iments. In both cases, we used targetless LiDAR-camera A.3.Physics-basedLiDARReflectanceModel
+calibration[20]toobtainthecoordinatetransformbetween
+Here,weprovidethemathematicalderivationforthespec-
+theLiDARandcamera.
+ular term of the LiDAR Reflectance Model. The Cook-
+Torrance BRDF model [9] for the specular component is
+Outdoor We recorded data from the Polaris Gem e4, a
+givenby:
+street-legal,four-seatervehicleoutfittedwithRTKGPS,an
+Ouster OS1-128 LiDAR, and an Oak-D LR stereo cam-
+era. The experiments were carried out in a shared testing F(ω )G(ω ,ω )D(h)
+f (ω ,ω )= i i o
+trackfacilitywithasecuretestbedarea.Adesignatedsafety s i o 4(ω ·n)(ω ·n)
+i o
+driverandsafetylookoutwerepresentatalltimes. Wecol-
+F(ω )G(ω ,ω )D(h)
+lectedthedatasetbymanuallydrivingthevehiclealongthe = i i o ,
+4cos2θ
+sametrajectory/sceneatdifferenttimesthroughouttheday.
+where:
+Indoor We used an AgileX Ranger Mini 2 mobile robot • D(h) is the microfacet distribution function, modeling
+platform with a Hesai FT120 solid-state LiDAR and Re- thedistributionofsurfacenormals,withhbeingthehalf-
+alsense D455 depth camera mounted on top. We recorded anglevector.
+Figure11.RGBandmaskedlidarintensityforadiffusewall(top)
+andaspecularwhiteboard(bottom).
+5.0
+4.1
+3.2
+2.3
+1.4
+2.2 2.4 2.6 2.8 3.0 3.2
+(radians)
+)sretem(d
+Specular Whiteboard
+5.0
+4.1
+3.2
+2.3
+1.4
+2.2 2.4 2.6 2.8 3.0 3.2
+(radians)
+)sretem(d
+Diffuse Wall
+100
+80
+60
+40
+20
+0
+Average
+Intensity
+For the geometry term, following the Cook-Torrance
+BRDFmodel,itcanbecalculatedas:
+(cid:18) (cid:19)
+2(ω ·n)(n·h) 2(ω ·n)(n·h)
+G=min 1, i , o
+(ω ·h) (ω ·h)
+o o
+=min(1,2cos2θ).
+Thus,thefinalspeculartermis:
+F(ω )G(ω ,ω )D(h)
+f (ω ,ω )= i i o
+s i o 4cos2θ
+F α2min(1,2cos2θ)
+= 0 .
+4πcos2θ(cos2θ(α2−1)+1)2
+A.4.ImplementationDetails
+Data Preprocessing For image inputs, we preprocess
+each frame and acquire diffusion-based priors for mate-
+rials and normals using RGB↔X [50] and GeoWizard
+[11]. For the indoor scene, we obtain an additional light-
+ing mask M by filtering the luminance. This mask is
+light
+usedtoexcludeunreliableregionsfromtherenderingloss,
+wherehigh-intensitylightingmakesitunreliabletoestimate
+Figure12.LiDARintensityisvisualizedfortwodifferentobjects:
+albedo.
+aspecularwhiteboardandadiffusewall. Thex-axis,θ,isthean-
+ForLiDARsequences,weprojecttheLiDARpointsinto
+glebetweenaLiDARrayandthecorrespondingsurfacenormal.
+imagespaceusingthecamera-LiDARposetransformation,
+They-axis,d,isthedistancetotheLiDARpoint.Eachhexbinrep-
+resulting in a sparse LiDAR intensity map. The intensity
+resentstheaverageLiDARintensityamongalltheLiDARpoints
+valuesarethennormalizedtotherange[0,1]. Furthermore,
+withinthatbin.
+the Waymo dataset provides the ground truth object poses
+for each object, which are used as T (t) to transform dy-
+k
+• G(ω i ,ω o )isthegeometryterm, accountingformasking namicnodesintotheworldcoordinatesystem.
+andshadowingofmicrofacets.
+• F(ω ) is the Fresnel term, which models reflectance
+i Method Details We develop our framework based on
+basedontheviewingangle.
+OmniRe [6], a 3D-GS framework designed for driving
+FortheLiDARlightingmodel,whereω =ω ,thehalf-
+i o scene. We initialize the means of the background 3D-GS
+anglevectorsimplifiesto:
+withLiDARpoints.Specifically,wesetthemaximumpoint
+ω +ω numberto8×105. IfthenumberofLiDARpointsexceeds
+h= i o =ω .
+∥ω +ω ∥ o thislimit,werandomlysamplepoints. Forrigidnodes,we
+i o
+randomly sample 5,000 points for initialization within the
+Themicrofacetdistributionfunctioniscommonlymod- 3Dboundingboxes.
+eledusingtheGGXdistribution: Forthecamerarenderingprocess,weadoptMonteCarlo
+ray tracing. For each Gaussian primitive g, we generate
+α2 M incidentraydirectionsusingFibonaccispheresampling
+D(h)= basedonthenormaldirection.Duringtraining,wesetM =
+π((h·n)2(α2−1)+1)2
+16,whileforinference,weuseM =128.
+α2
+= ,
+π(cos2θ(α2−1)+1)2
+Optimization The model is trained for 30,000 iterations
+with a single NVIDIA A100 GPU. It takes approximately
+whereαrepresentsthesurfaceroughness.
+2-3hoursoftrainingforeachscene. Thelearningrateisset
+FortheFresnelterm,weuse:
+to 1×10−5. We adopt a two-stage training procedure: in
+thefirststage, whichconsistsofthefirst15,000iterations,
+F(ω )=F +(1−F )(1−(ω ·h))5 =F . wefollowthegeneral3D-GSsplitreplicationapproach,and
+i 0 0 i 0
+Input Normal Albedo Roughness LiDAR Reflectance
+Figure13.Moreresultsforinverserendering.
+Input Relighting
+Figure16.Ablationstudyondiffusionprior.
+nodes. Inthenext15,000iterations,allintrinsicproperties
+except for LiDAR albedo and RGB albedo are fixed, and
+lightingconditionsarealsooptimized. Thetotallossisde-
+Figure14.Relightingresultsonvideosequences. finedas:
+L =λ L +λ L +λ L +λ L
+total 1 lidar 2 rgb 3 nor 4 mat
++λ L +λ L , (8)
+5 rgb→lidar 6 lidar→rgb
+where λ is the loss weight for each term. Specifically,
+i
+wesetλ =λ =1,λ =λ =0.1,andλ =λ =0.05.
+1 2 3 4 5 6
+Application For object insertion, we transfer the trained
+dynamicnodesfromtheWaymodatasetintonewscenesby
+directly loading the corresponding checkpoints. Since the
+dynamic nodes retain their intrinsic properties, a relit re-
+sultcanbedirectlyobtainedthroughourcamerarendering
+process. Fornighttimesimulation, weremovethesunlight
+representationandsettheskydomelightingtoasmallcon-
+stantintensity.Additionally,weuseaspotlighttomodelthe
+headlightsandstreetlights,withitscenterpositionedatthe
+cameraoriginorthelightpole.Thelightintensitydecreases
+withthesquareofthedistancefromthespotlightcenterto
+theGaussian’smeans.
+A.5.MoreQualitativeResults
+Figure15.ComparisonforalbedoestimationwithRGB↔X.
+More Inverse Rendering Fig. 13 presents additional in-
+verse rendering results, including normal, albedo, rough-
+allintrinsicpropertiesareoptimizedsimultaneously. After ness, and LiDAR reflectance. As shown in the figure, the
+completing the first stage, the LiDAR albedo is processed LiDAR and RGB albedo are consistent, and we can suc-
+into masks, and we stop duplicating and deleting 3D-GS cessfullydisentangleshadowsfromthealbedo.
+Figure17.AblationstudyonLiDARreflectancemodeling.
+Method Intensity-RMSE↓
+Lambertian 0.0493
+Ours(PBR) 0.0470
+Table5.AblationstudyonLiDARreflectancemodeling.
+More Relighting Results We perform relighting on two
+sequences: thefirstsimulatesnighttimeconditions,andthe
+secondcontinuouslychangesthesundirection. Wepresent
+8framesofeachvideoinFig.14.
+ComparisonwithDiffusionPrior Fig.15comparesthe
+albedo estimation results of our method against RGB↔X
+onanimagesequence. ThealbedopriorfromRGB↔Xex-
+hibitssignificanttemporalinconsistencyduetotheinherent
+limitations of the monocular diffusion model. In contrast,
+ourframeworkachievestime-consistentalbedoestimation,
+highlighting the advantages of physically based optimiza-
+tion.
+Ablation on Diffusion Prior We conduct an ablation
+studytoassesstheroleofthediffusionprior. Asshownin
+Fig.16,incorporatingthediffusionpriorproducessmoother
+albedo estimates and reduces shadow ambiguity (e.g., on
+thetrees),highlightingitseffectiveness.
+Ablation on LiDAR Reflectance Modeling Tab. 5 and
+Fig.17provideablationstudiesofLiDARsimulationona
+scene. Our reflectance model faithfully captures the spec-
+ular highlights in the GT intensity—e.g., around the car’s
+frontlightandwheelarch—whereastheLambertianmodel
+producesoverlydiffuse,physicallyimplausibleshading.

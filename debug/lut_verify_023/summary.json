@@ -1,0 +1,115 @@
+{
+  "lut": {
+    "lut_shape": [
+      5,
+      256
+    ],
+    "edges_shape": [
+      257
+    ],
+    "counts_nonzero": 1179,
+    "beam_bias_factors": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "metadata": {
+      "cell_size": 0.25,
+      "num_bins": 256,
+      "quantile_low": 0.5,
+      "quantile_high": 99.5,
+      "only_ground": false,
+      "top_lidar_only": false,
+      "min_range": null,
+      "max_range": null,
+      "per_scene_lut": true,
+      "per_beam_edges": false,
+      "target_stat": "median",
+      "beam_bias_correction": "none",
+      "total_scans": 199,
+      "used_scans": 199,
+      "total_points": 37486588,
+      "used_points": 37486588,
+      "used_cells": 328604
+    }
+  },
+  "num_scans": 199,
+  "num_points": 37486588,
+  "raw_beam_stats": {
+    "0": {
+      "count": 33768641,
+      "mean": 1.9209622144699097,
+      "std": 219.54930114746094,
+      "median": 0.10205078125
+    },
+    "1": {
+      "count": 735055,
+      "mean": 0.24622184038162231,
+      "std": 0.4751744568347931,
+      "median": 0.126953125
+    },
+    "2": {
+      "count": 922799,
+      "mean": 0.19892552495002747,
+      "std": 0.37560781836509705,
+      "median": 0.09326171875
+    },
+    "3": {
+      "count": 960777,
+      "mean": 0.32680732011795044,
+      "std": 0.5925215482711792,
+      "median": 0.12158203125
+    },
+    "4": {
+      "count": 1099316,
+      "mean": 0.20768745243549347,
+      "std": 0.38984963297843933,
+      "median": 0.08984375
+    }
+  },
+  "normalized_beam_stats": {
+    "0": {
+      "count": 33768641,
+      "mean": 0.4445708394050598,
+      "std": 0.047670621424913406,
+      "median": 0.4467053711414337
+    },
+    "1": {
+      "count": 735055,
+      "mean": 0.10429051518440247,
+      "std": 0.0340510830283165,
+      "median": 0.08361619710922241
+    },
+    "2": {
+      "count": 922799,
+      "mean": 0.10032280534505844,
+      "std": 0.01955704391002655,
+      "median": 0.09329678863286972
+    },
+    "3": {
+      "count": 960777,
+      "mean": 0.11301183700561523,
+      "std": 0.0348411463201046,
+      "median": 0.10651960968971252
+    },
+    "4": {
+      "count": 1099316,
+      "mean": 0.10647112131118774,
+      "std": 0.013656769879162312,
+      "median": 0.105694979429245
+    }
+  },
+  "raw_beam_mean_std": 0.6719416975975037,
+  "normalized_beam_mean_std": 0.1354811191558838,
+  "raw_mean_cell_disagreement": 0.5239865292928003,
+  "normalized_mean_cell_disagreement": 0.13171458232105765,
+  "raw_cells_used": 492212,
+  "normalized_cells_used": 492212,
+  "deltas": {
+    "beam_mean_std_delta": -0.5364605784416199,
+    "cell_disagreement_delta": -0.39227194697174267
+  },
+  "verdict": "improved"
+}
