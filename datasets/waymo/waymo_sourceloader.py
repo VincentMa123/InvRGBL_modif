@@ -381,6 +381,7 @@ class WaymoLiDARSource(SceneLidarSource):
         Load the lidar data of the dataset from the filelist.
         """
         origins, directions, ranges, laser_ids = [], [], [], []
+        intensities = []
         # flow/ground info are used for evaluation only
         flows, flow_classes, grounds = [], [], []
         # in waymo, we simplify timestamps as the time indices
@@ -414,7 +415,8 @@ class WaymoLiDARSource(SceneLidarSource):
             lidar_flows = torch.from_numpy(lidar_info[:, 6:9]).float()
             lidar_flow_classes = torch.from_numpy(lidar_info[:, 9]).long()
             ground_labels = torch.from_numpy(lidar_info[:, 10]).long()
-            # we don't collect intensities and elongations for now
+            lidar_intensities = torch.from_numpy(lidar_info[:, 11]).float()
+            # we don't collect elongations for now
 
             # select lidar points based on a truncated ego-forward-directional range
             # this is to make sure most of the lidar points are within the range of the camera
@@ -428,6 +430,7 @@ class WaymoLiDARSource(SceneLidarSource):
             lidar_origins = lidar_origins[valid_mask]
             lidar_points = lidar_points[valid_mask]
             lidar_ids = lidar_ids[valid_mask]
+            lidar_intensities = lidar_intensities[valid_mask]
             lidar_flows = lidar_flows[valid_mask]
             lidar_flow_classes = lidar_flow_classes[valid_mask]
             ground_labels = ground_labels[valid_mask]
@@ -456,6 +459,7 @@ class WaymoLiDARSource(SceneLidarSource):
             directions.append(lidar_directions)
             ranges.append(lidar_ranges)
             laser_ids.append(lidar_ids)
+            intensities.append(lidar_intensities)
             flows.append(lidar_flows)
             flow_classes.append(lidar_flow_classes)
             grounds.append(ground_labels)
@@ -476,6 +480,7 @@ class WaymoLiDARSource(SceneLidarSource):
         self.directions = torch.cat(directions, dim=0)
         self.ranges = torch.cat(ranges, dim=0)
         self.laser_ids = torch.cat(laser_ids, dim=0)
+        self.intensities = torch.cat(intensities, dim=0)
         self.visible_masks = torch.zeros_like(self.ranges).squeeze().bool()
         self.colors = torch.ones_like(self.directions)
         # becasue the flows here are velocities (m/s), and the fps of the lidar is 10,
@@ -491,6 +496,7 @@ class WaymoLiDARSource(SceneLidarSource):
 
     def to(self, device: torch.device):
         super().to(device)
+        self.intensities = self.intensities.to(self.device)
         self.flows = self.flows.to(device)
         self.flow_classes = self.flow_classes.to(device)
         self.grounds = self.grounds.to(self.device)
@@ -529,6 +535,7 @@ class WaymoLiDARSource(SceneLidarSource):
             self.flows = self.flows[self.visible_masks]
             self._timesteps = self._timesteps[self.visible_masks]
             self._normalized_time = self._normalized_time[self.visible_masks]
+            self.intensities = self.intensities[self.visible_masks]
             self.colors = self.colors[self.visible_masks]
             logger.info(
                 f"[Lidar] {num_bf - self.visible_masks.sum()} out of {num_bf} points are cleared. {self.visible_masks.sum()} points left."

@@ -3,5 +3,5 @@ __pycache__/
 *.so
 *.egg-info/
 /data/
-
+/work_dirs/
 

@@ -176,6 +176,7 @@ class DrivingDataset(SceneDataset):
         downsample_factor: float = None,
         return_color=False,
         return_normalized_time=False,
+        return_intensity=False,
         device: torch.device = torch.device("cpu")
         ) -> Tensor:
         assert self.lidar_source is not None, "Must have lidar source if you want to get init pcd"
@@ -201,7 +202,12 @@ class DrivingDataset(SceneDataset):
             sampled_time = self.lidar_source._normalized_time[sampled_idx].to(device)
             sampled_time = sampled_time[..., None]
         
-        return sampled_pts, sampled_color, sampled_time
+        sampled_intensity = None
+        if return_intensity and hasattr(self.lidar_source, "intensities"):
+            sampled_intensity = self.lidar_source.intensities[sampled_idx].to(device)
+            sampled_intensity = sampled_intensity[..., None]
+        
+        return sampled_pts, sampled_color, sampled_time, sampled_intensity
     
     def seg_dynamic_instances_in_lidar_frame(
         self,
@@ -478,6 +484,7 @@ class DrivingDataset(SceneDataset):
         valid_instances_dict: Dict[int, Dict[str, Tensor]],
         seed_colors: Tensor = None,
         seed_time: Tensor = None,
+        seed_intensity: Tensor = None,
     ):
         """
         This function is used to filter out the points that are inside the bounding boxes of the instances
@@ -520,6 +527,8 @@ class DrivingDataset(SceneDataset):
             seed_colors = seed_colors[~inside_mask]
         if seed_time is not None:
             seed_time = seed_time[~inside_mask]
+        if seed_intensity is not None:
+            seed_intensity = seed_intensity[~inside_mask]
         
         if DEBUG_PCD:
             export_points_to_ply(
@@ -549,7 +558,8 @@ class DrivingDataset(SceneDataset):
         return {
             "pts": seed_pts,
             "colors": seed_colors,
-            "time": seed_time
+            "time": seed_time,
+            "intensity": seed_intensity,
         }
 
     def check_pts_visibility(self, pts_xyz):

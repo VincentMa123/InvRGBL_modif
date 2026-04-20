@@ -123,12 +123,12 @@ class MultiTrainer(BasicTrainer):
                 init_cfg = model_cfg.pop('init')
                 # sample points from the lidar point clouds
                 if init_cfg.get("from_lidar", None) is not None:
-                    sampled_pts, sampled_color, sampled_time = dataset.get_lidar_samples(
-                        **init_cfg.from_lidar, device=self.device
+                    sampled_pts, sampled_color, sampled_time, sampled_intensity = dataset.get_lidar_samples(
+                        **init_cfg.from_lidar, return_intensity=True, device=self.device
                     )
                 else:
-                    sampled_pts, sampled_color, sampled_time = \
-                        torch.empty(0, 3).to(self.device), torch.empty(0, 3).to(self.device), None
+                    sampled_pts, sampled_color, sampled_time, sampled_intensity = \
+                        torch.empty(0, 3).to(self.device), torch.empty(0, 3).to(self.device), None, None
                 
                 random_pts = []
                 num_near_pts = init_cfg.get('near_randoms', 0)
@@ -148,16 +148,24 @@ class MultiTrainer(BasicTrainer):
                     
                     sampled_pts = torch.cat([sampled_pts, valid_pts], dim=0)
                     sampled_color = torch.cat([sampled_color, torch.rand(valid_pts.shape, ).to(self.device)], dim=0)
+                    if sampled_intensity is not None:
+                        sampled_intensity = torch.cat([
+                            sampled_intensity,
+                            torch.ones(valid_pts.shape[0], 1, device=self.device)
+                        ], dim=0)
                 
 
                 processed_init_pts = dataset.filter_pts_in_boxes(
                     seed_pts=sampled_pts,
                     seed_colors=sampled_color,
+                    seed_intensity=sampled_intensity,
                     valid_instances_dict=allnode_pts_dict
                 )
                 
                 model.create_from_pcd(
-                    init_means=processed_init_pts["pts"], init_colors=processed_init_pts["colors"]
+                    init_means=processed_init_pts["pts"],
+                    init_colors=processed_init_pts["colors"],
+                    init_intensity=processed_init_pts.get("intensity", None),
                 )
                 
             if class_name == 'RigidNodes':

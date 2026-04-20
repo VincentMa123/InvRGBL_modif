@@ -42,17 +42,32 @@ def GGX_specular(
 
 ### USING ###
 def rendering_equation_lidar(base_color, roughness, normals, viewdirs, view_dists):
-    #### neglecting d^2 in rendering equation
     normals = normals.detach()
-    #roughness = roughness.detach()
-    
-    n_d_i = (normals * viewdirs).sum(-1, keepdim=True).clamp(min=0)
-    f_d = base_color[:, None] #/ np.pi
-    f_s = 0 #GGX_specular(normals, viewdirs, viewdirs[:,None, :], roughness, fresnel=0.04)
 
-    transport =  1 #n_d_i[:,None,:]  # （num_pts, num_sample, 1)
-    #specular = ((f_s) * transport).mean(dim=-2)
-    pbr = ((f_d + f_s) * transport).mean(dim=-2) / (view_dists **2)
+    # Ensure viewdirs has shape (N, 1, 3) for broadcasting
+    if viewdirs.dim() == 2:
+        viewdirs = viewdirs[:, None, :]  # (N, 1, 3)
+
+    # cos(theta) = n · omega_o
+    n_d_i = (normals[:, None, :] * viewdirs).sum(-1, keepdim=True).clamp(min=1e-6)
+    cos_theta = n_d_i
+    cos2_theta = cos_theta ** 2
+
+    # Diffuse term: fd = rho_lidar / pi
+    f_d = base_color[:, None, :] / np.pi
+
+    # Specular term from paper (special case of Cook-Torrance with wi = wo)
+    # fs = F0 * tau^2 * min(1, 2*cos^2(theta)) / (4*pi*cos^2(theta)*(cos^2(theta)*(tau^2-1)+1)^2)
+    tau = roughness[:, None, :]
+    tau2 = tau ** 2
+    F0 = 0.04
+
+    numerator = F0 * tau2 * torch.clamp(2 * cos2_theta, max=1.0)
+    denominator = 4 * np.pi * cos2_theta * (cos2_theta * (tau2 - 1) + 1) ** 2
+    f_s = numerator / denominator.clamp(min=1e-6)
+
+    # Full LiDAR intensity: I = (fd + fs) * cos(theta) / d^2  (Pe = 1 as per paper)
+    pbr = ((f_d + f_s) * cos_theta).mean(dim=-2) / (view_dists ** 2)
     return pbr
 
 

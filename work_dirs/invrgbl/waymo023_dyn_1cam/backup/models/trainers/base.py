@@ -283,7 +283,7 @@ class BasicTrainer(nn.Module):
                 incident_visibility_results = []
                 incident_dirs_results = []
                 incident_areas_results = []
-                sample_num = 128 #24
+                sample_num = 24
                 chunk_size = gaussians_xyz.shape[0]
                 for offset in tqdm(range(0, gaussians_xyz.shape[0], chunk_size), "Update visibility with raytracing."):
                     incident_dirs, incident_areas = sample_incident_rays(gaussians_normal[offset:offset + chunk_size], True,
@@ -583,7 +583,6 @@ class BasicTrainer(nn.Module):
                 cam_pos = cam_pos 
                 viewdirs = F.normalize(cam_pos - gs.means, dim=-1)
                 view_dists = torch.norm(cam_pos - gs.means, dim=1) 
-                view_dists = torch.sigmoid(view_dists/10)
                 view_dists = view_dists[...,None]
                 normals = gs.extras['normals']
                 albedos = gs.extras['albedos']
@@ -794,12 +793,118 @@ class BasicTrainer(nn.Module):
             valid_loss_mask = torch.ones_like(image_infos["sky_masks"])
 
         # ------------------------------
-        # After freeze step
+        # Common setup
+        # ------------------------------
+        gt_rgb = image_infos["pixels"] * valid_loss_mask[..., None]
+        predicted_rgb = outputs["rgb"] * valid_loss_mask[..., None]
+
+        # rgb loss
+        Ll1 = torch.abs(gt_rgb - predicted_rgb).mean()
+        simloss = 1 - self.ssim(gt_rgb.permute(2, 0, 1)[None, ...],
+                                predicted_rgb.permute(2, 0, 1)[None, ...])
+        loss_dict["rgb_loss"] = self.get_loss_weight("rgb") * Ll1
+        loss_dict["ssim_loss"] = self.get_loss_weight("ssim") * simloss
+
+        # mask loss
+        gt_occupied_mask = (1.0 - image_infos["sky_masks"]).float() * valid_loss_mask
+        pred_occupied_mask = outputs["opacity"].squeeze() * valid_loss_mask
+        if self.sky_opacity_loss_fn is not None:
+            sky_loss_opacity = self.sky_opacity_loss_fn(pred_occupied_mask, gt_occupied_mask)
+            loss_dict["sky_loss_opacity"] = self.get_loss_weight("mask") * sky_loss_opacity
+
+        # depth loss (Stage 1 only)
+        if self.depth_loss_fn is not None and self.step < self.freeze_step:
+            gt_depth = image_infos["lidar_depth_map"] 
+            lidar_hit_mask = (gt_depth > 0).float() * valid_loss_mask
+            pred_depth = outputs["depth"]
+
+            depth_loss = self.depth_loss_fn(pred_depth, gt_depth, lidar_hit_mask)
+            lidar_w_decay = self.losses_dict.depth.get("lidar_w_decay", -1)
+            if lidar_w_decay > 0:
+                decay_weight = np.exp(-self.step / 8000 * lidar_w_decay)
+            else:
+                decay_weight = 1
+            depth_loss = self.get_loss_weight("depth") * depth_loss * decay_weight
+            loss_dict["depth_loss"] = depth_loss
+
+        # diffusion priors and smoothness (both stages)
+        if "roughness_images" in image_infos:
+            roughness_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
+            rendered_roughness = outputs["rendered_roughness"] * roughness_images_mask
+            gt_roughness = image_infos["roughness_images"] * roughness_images_mask
+            L1_rough_loss = torch.abs(gt_roughness - rendered_roughness).mean()
+            loss_dict["roughness_loss"] = self.get_loss_weight("roughness") * L1_rough_loss
+
+            smooth_roughness_loss = normal_map_smooth_loss(rendered_roughness[None,...])
+            loss_dict["smooth_roughness_loss"] = self.get_loss_weight("smooth_roughness") * smooth_roughness_loss
+
+        if "shading_images" in image_infos:
+            images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
+            rendered_sun_visibility = outputs["rendered_sun_visibility"] * images_mask
+            gt_sun_visibility = image_infos["shading_images"] * images_mask
+
+            smooth_sun_visibility_loss = normal_map_smooth_loss(rendered_sun_visibility[None,...])
+            loss_dict["smooth_sun_visibility_loss"] = self.get_loss_weight("smooth_sun_visibility") * smooth_sun_visibility_loss
+
+            sun_visibility_loss = torch.abs(gt_sun_visibility - rendered_sun_visibility).mean()
+            loss_dict["sun_visibility_loss"] = self.get_loss_weight("sun_visibility") * sun_visibility_loss
+
+        if "albedo_images" in image_infos:
+            albedo_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
+            gt_albedo = image_infos["albedo_images"] * albedo_images_mask
+            predicted_albedo = outputs["rendered_albedos"] * albedo_images_mask
+
+            albedo_smooth_loss = normal_map_smooth_loss(predicted_albedo[None,...])
+            loss_dict["albedo_smooth_loss"] = self.get_loss_weight("albedo_smooth") * albedo_smooth_loss
+
+            Ll1_albedo = torch.abs(gt_albedo - predicted_albedo).mean()
+            if self.step > self.freeze_step:
+                loss_dict["albedo_loss"] = self.get_loss_weight("albedo") * Ll1_albedo
+            else:
+                loss_dict["albedo_loss"] = self.get_loss_weight("albedo_pre") * Ll1_albedo
+
+        if "normal_images" in image_infos:
+            normal_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
+            normal_images = image_infos['normal_images'] * normal_images_mask
+            predicted_normal = outputs["rendered_normal"] * normal_images_mask
+
+            Ll1_normal_sparse = torch.abs(predicted_normal - normal_images).mean()
+            loss_dict["gt_normal_loss"] = self.get_loss_weight("gt_normal") * Ll1_normal_sparse
+
+            smooth_normal_loss = normal_map_smooth_loss(predicted_normal[None,...])
+            loss_dict["smooth_normal_loss"] = self.get_loss_weight("smooth_normal") * smooth_normal_loss
+
+        # opacity entropy reg
+        if "opacity_entropy" in self.losses_dict:
+            pred_opacity = torch.clamp(outputs["opacity"].squeeze(), 1e-6, 1 - 1e-6)
+            loss_dict["opacity_entropy_loss"] = self.get_loss_weight("opacity_entropy") * (
+                -pred_opacity * torch.log(pred_opacity)
+            ).mean()
+
+        # inverse depth smoothness reg
+        if "inverse_depth_smoothness" in self.losses_dict:
+            inverse_depth = 1 / (outputs["depth"] + 1e-5)
+            loss_inv_depth = kornia.losses.inverse_depth_smoothness_loss(
+                inverse_depth[None].repeat(1, 1, 1, 3).permute(0, 3, 1, 2),
+                image_infos["pixels"][None].permute(0, 3, 1, 2)
+            )
+            loss_dict["inverse_depth_smoothness_loss"] = self.get_loss_weight("inverse_depth_smoothness") * loss_inv_depth
+
+        # affine reg
+        if "affine" in self.losses_dict and "Affine" in self.models:
+            affine_trs = self.models['Affine']({"img_idx": image_infos["img_idx"].flatten()[0]})
+            reg_mat = torch.eye(3, device=self.device)
+            reg_shift = torch.zeros(3, device=self.device)
+            loss_affine = torch.abs(affine_trs[..., :3, :3] - reg_mat).mean() \
+                        + torch.abs(affine_trs[..., :3, 3:] - reg_shift).mean()
+            loss_dict["affine_loss"] = self.get_loss_weight("affine") * loss_affine
+
+        # ------------------------------
+        # Stage 2 specific losses
         # ------------------------------
         if self.step > self.freeze_step:
             if "rendered_pbr" in outputs:
                 rendered_pbr = outputs["rendered_pbr"] * valid_loss_mask[..., None]
-                gt_rgb = image_infos["pixels"] * valid_loss_mask[..., None]
                 Ll1_pbr = torch.abs(rendered_pbr - gt_rgb).mean()
                 loss_dict["pbr_loss"] = self.get_loss_weight("pbr") * Ll1_pbr
 
@@ -809,45 +914,7 @@ class BasicTrainer(nn.Module):
                 loss_light = F.l1_loss(diffuse_light, mean_light)
                 loss_dict["diffuse_light_loss"] = self.get_loss_weight("diffuse_light") * loss_light
 
-            if "albedo_images" in image_infos:
-                albedo_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
-                gt_albedo = image_infos["albedo_images"] * albedo_images_mask
-                predicted_albedo = outputs["rendered_albedos"] * albedo_images_mask
-                Ll1_albedo = torch.abs(gt_albedo - predicted_albedo).mean()
-                loss_dict["albedo_loss"] = self.get_loss_weight("albedo") * Ll1_albedo
-
-        # ------------------------------
-        # Before freeze step
-        # ------------------------------
-        else:
-            if "rendered_pbr" in outputs:
-                rendered_pbr = outputs["rendered_pbr"] * valid_loss_mask[..., None]
-                gt_rgb = image_infos["pixels"] * valid_loss_mask[..., None]
-                Ll1_pbr = torch.abs(rendered_pbr - gt_rgb).mean()
-                loss_dict["pbr_loss"] = self.get_loss_weight("pbr_pre") * Ll1_pbr
-
-            if "roughness_images" in image_infos:
-                roughness_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
-                rendered_roughness = outputs["rendered_roughness"] * roughness_images_mask
-                gt_roughness = image_infos["roughness_images"] * roughness_images_mask
-                L1_rough_loss = torch.abs(gt_roughness - rendered_roughness).mean()
-                loss_dict["roughness_loss"] = self.get_loss_weight("roughness") * L1_rough_loss
-
-                smooth_roughness_loss = normal_map_smooth_loss(rendered_roughness[None,...])
-                loss_dict["smooth_roughness_loss"] = self.get_loss_weight("smooth_roughness") * smooth_roughness_loss
-
-            if "shading_images" in image_infos:
-                images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
-                rendered_sun_visibility = outputs["rendered_sun_visibility"] * images_mask
-                gt_sun_visibility = image_infos["shading_images"] * images_mask
-
-                smooth_sun_visibility_loss = normal_map_smooth_loss(rendered_sun_visibility[None,...])
-                loss_dict["smooth_sun_visibility_loss"] = self.get_loss_weight("smooth_sun_visibility") * smooth_sun_visibility_loss
-
-                sun_visibility_loss = torch.abs(gt_sun_visibility - rendered_sun_visibility).mean()
-                loss_dict["sun_visibility_loss"] = self.get_loss_weight("sun_visibility") * sun_visibility_loss
-
-            if "intensity_images" in image_infos: 
+            if "intensity_images" in image_infos and "albedo_images" in image_infos:
                 intensity_images_mask = valid_loss_mask[..., None] * (image_infos['intensity_images'] > 1e-3) 
                 rendered_intensity = outputs["rendered_intensity"] * intensity_images_mask
                 intensity_images = image_infos['intensity_images'] * intensity_images_mask
@@ -862,111 +929,29 @@ class BasicTrainer(nn.Module):
                 ref_neighborhood_smoothness_loss = neighborhood_smoothness_loss(albedo_mean[...,None], rendered_reflectivity)
                 loss_dict["ref_neighborhood_smoothness_loss"] = self.get_loss_weight("ref_neighborhood_smoothness") * ref_neighborhood_smoothness_loss
 
-                # ref_region_consistency_loss = self.region_consistency_loss(gt_albedo, rendered_reflectivity)
-                # loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency") * ref_region_consistency_loss
-
-            if "albedo_images" in image_infos:
-                albedo_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
-                gt_albedo = image_infos["albedo_images"] * albedo_images_mask
-                predicted_albedo = outputs["rendered_albedos"] * albedo_images_mask
-
-                albedo_smooth_loss = normal_map_smooth_loss(predicted_albedo[None,...])
-                loss_dict["albedo_smooth_loss"] = self.get_loss_weight("albedo_smooth") * albedo_smooth_loss
-
+                predicted_albedo = outputs["rendered_albedos"] * images_mask
                 ref_region_consistency_loss = self.region_consistency_loss(rendered_reflectivity.detach(), predicted_albedo.mean(dim=-1))
                 loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency_albedo") * ref_region_consistency_loss
 
-                Ll1_albedo = torch.abs(gt_albedo - predicted_albedo).mean()
-                loss_dict["albedo_loss"] = self.get_loss_weight("albedo_pre") * Ll1_albedo
+        # dynamic region loss
+        dynamic_region_cfg = self.losses_dict.get("dynamic_region", None)
+        if dynamic_region_cfg is not None:
+            weight_factor = dynamic_region_cfg.get("w", 1.0)
+            start_from = dynamic_region_cfg.get("start_from", 0)
+            if self.step == start_from:
+                self.render_dynamic_mask = True
+            if self.step > start_from and "Dynamic_opacity" in outputs:
+                dynamic_pred_mask = (outputs["Dynamic_opacity"].data > 0.2).squeeze()
+                dynamic_pred_mask = dynamic_pred_mask & valid_loss_mask.bool()
+                if dynamic_pred_mask.sum() > 0:
+                    Ll1 = torch.abs(gt_rgb[dynamic_pred_mask] - predicted_rgb[dynamic_pred_mask]).mean()
+                    loss_dict["vehicle_region_rgb_loss"] = weight_factor * Ll1
 
-            if "normal_images" in image_infos:
-                normal_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
-                normal_images = image_infos['normal_images'] * normal_images_mask
-                predicted_normal = outputs["rendered_normal"] * normal_images_mask
-
-                Ll1_normal_sparse = torch.abs(predicted_normal - normal_images).mean()
-                loss_dict["gt_normal_loss"] = self.get_loss_weight("gt_normal") * Ll1_normal_sparse
-
-                smooth_normal_loss = normal_map_smooth_loss(predicted_normal[None,...])
-                loss_dict["smooth_normal_loss"] = self.get_loss_weight("smooth_normal") * smooth_normal_loss
-
-            # rgb loss
-            gt_rgb = image_infos["pixels"] * valid_loss_mask[..., None]
-            predicted_rgb = outputs["rgb"] * valid_loss_mask[..., None]
-
-            Ll1 = torch.abs(gt_rgb - predicted_rgb).mean()
-            simloss = 1 - self.ssim(gt_rgb.permute(2, 0, 1)[None, ...],
-                                    predicted_rgb.permute(2, 0, 1)[None, ...])
-            loss_dict["rgb_loss"] = self.get_loss_weight("rgb") * Ll1
-            loss_dict["ssim_loss"] = self.get_loss_weight("ssim") * simloss
-
-            # mask loss
-            gt_occupied_mask = (1.0 - image_infos["sky_masks"]).float() * valid_loss_mask
-            pred_occupied_mask = outputs["opacity"].squeeze() * valid_loss_mask
-            if self.sky_opacity_loss_fn is not None:
-                sky_loss_opacity = self.sky_opacity_loss_fn(pred_occupied_mask, gt_occupied_mask)
-                loss_dict["sky_loss_opacity"] = self.get_loss_weight("mask") * sky_loss_opacity
-
-            # depth loss
-            if self.depth_loss_fn is not None:
-                gt_depth = image_infos["lidar_depth_map"] 
-                lidar_hit_mask = (gt_depth > 0).float() * valid_loss_mask
-                pred_depth = outputs["depth"]
-
-                if self.step < self.freeze_step:
-                    depth_loss = self.depth_loss_fn(pred_depth, gt_depth, lidar_hit_mask)
-                    lidar_w_decay = self.losses_dict.depth.get("lidar_w_decay", -1)
-                    if lidar_w_decay > 0:
-                        decay_weight = np.exp(-self.step / 8000 * lidar_w_decay)
-                    else:
-                        decay_weight = 1
-                    depth_loss = self.get_loss_weight("depth") * depth_loss * decay_weight
-                    loss_dict["depth_loss"] = depth_loss
-
-            # opacity entropy reg
-            if "opacity_entropy" in self.losses_dict:
-                pred_opacity = torch.clamp(outputs["opacity"].squeeze(), 1e-6, 1 - 1e-6)
-                loss_dict["opacity_entropy_loss"] = self.get_loss_weight("opacity_entropy") * (
-                    -pred_opacity * torch.log(pred_opacity)
-                ).mean()
-
-            # inverse depth smoothness reg
-            if "inverse_depth_smoothness" in self.losses_dict:
-                inverse_depth = 1 / (outputs["depth"] + 1e-5)
-                loss_inv_depth = kornia.losses.inverse_depth_smoothness_loss(
-                    inverse_depth[None].repeat(1, 1, 1, 3).permute(0, 3, 1, 2),
-                    image_infos["pixels"][None].permute(0, 3, 1, 2)
-                )
-                loss_dict["inverse_depth_smoothness_loss"] = self.get_loss_weight("inverse_depth_smoothness") * loss_inv_depth
-
-            # affine reg
-            if "affine" in self.losses_dict and "Affine" in self.models:
-                affine_trs = self.models['Affine']({"img_idx": image_infos["img_idx"].flatten()[0]})
-                reg_mat = torch.eye(3, device=self.device)
-                reg_shift = torch.zeros(3, device=self.device)
-                loss_affine = torch.abs(affine_trs[..., :3, :3] - reg_mat).mean() \
-                            + torch.abs(affine_trs[..., :3, 3:] - reg_shift).mean()
-                loss_dict["affine_loss"] = self.get_loss_weight("affine") * loss_affine
-
-            # dynamic region loss
-            dynamic_region_cfg = self.losses_dict.get("dynamic_region", None)
-            if dynamic_region_cfg is not None:
-                weight_factor = dynamic_region_cfg.get("w", 1.0)
-                start_from = dynamic_region_cfg.get("start_from", 0)
-                if self.step == start_from:
-                    self.render_dynamic_mask = True
-                if self.step > start_from and "Dynamic_opacity" in outputs:
-                    dynamic_pred_mask = (outputs["Dynamic_opacity"].data > 0.2).squeeze()
-                    dynamic_pred_mask = dynamic_pred_mask & valid_loss_mask.bool()
-                    if dynamic_pred_mask.sum() > 0:
-                        Ll1 = torch.abs(gt_rgb[dynamic_pred_mask] - predicted_rgb[dynamic_pred_mask]).mean()
-                        loss_dict["vehicle_region_rgb_loss"] = weight_factor * Ll1
-
-            # gaussian reg losses
-            for class_name in self.gaussian_classes.keys():
-                class_reg_loss = self.models[class_name].compute_reg_loss()
-                for k, v in class_reg_loss.items():
-                    loss_dict[f"{class_name}_{k}"] = v
+        # gaussian reg losses
+        for class_name in self.gaussian_classes.keys():
+            class_reg_loss = self.models[class_name].compute_reg_loss()
+            for k, v in class_reg_loss.items():
+                loss_dict[f"{class_name}_{k}"] = v
 
         return loss_dict
 

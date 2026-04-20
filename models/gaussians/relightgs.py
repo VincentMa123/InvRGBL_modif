@@ -103,7 +103,7 @@ class RelightableGaussian(nn.Module):
     def sh_degree(self):
         return self.ctrl_cfg.sh_degree
 
-    def create_from_pcd(self, init_means: torch.Tensor, init_colors: torch.Tensor) -> None:
+    def create_from_pcd(self, init_means: torch.Tensor, init_colors: torch.Tensor, init_intensity: torch.Tensor = None) -> None:
         self._means = Parameter(init_means)
         
         distances, _ = k_nearest_sklearn(self._means.data, 3)
@@ -152,8 +152,16 @@ class RelightableGaussian(nn.Module):
             reflectance = init_colors.mean(dim=-1)[...,None]
             init_colors = torch.cat((init_colors,reflectance),dim=-1)
             self._base_color = Parameter(init_colors)
-            #TODO: use lidar intensity to initalize roughness
-            self._roughness = Parameter(torch.ones(init_means.shape[0], 1, device=self.device)) 
+            if init_intensity is not None and init_intensity.numel() == init_means.shape[0]:
+                # Map LiDAR intensity to initial roughness:
+                # high intensity -> low roughness (specular), low intensity -> high roughness (diffuse)
+                intensity_min = init_intensity.min()
+                intensity_max = init_intensity.max()
+                intensity_norm = (init_intensity - intensity_min) / (intensity_max - intensity_min + 1e-6)
+                init_roughness = 1.0 - intensity_norm
+                self._roughness = Parameter(init_roughness.to(self.device))
+            else:
+                self._roughness = Parameter(torch.ones(init_means.shape[0], 1, device=self.device)) 
             #self._metallic = Parameter(torch.zeros(init_means.shape[0], 1, device=self.device))    
             self.max_sh_degree = 3
             incidents = torch.zeros((init_means.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()

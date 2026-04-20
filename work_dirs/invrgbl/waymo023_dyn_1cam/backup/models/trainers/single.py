@@ -85,12 +85,12 @@ class SingleTrainer(BasicTrainer):
                 init_cfg = model_cfg.pop('init')
                 # sample points from the lidar point clouds
                 if init_cfg.get("from_lidar", None) is not None:
-                    sampled_pts, sampled_color, sampled_time = dataset.get_lidar_samples(
-                        **init_cfg.from_lidar, device=self.device
+                    sampled_pts, sampled_color, sampled_time, sampled_intensity = dataset.get_lidar_samples(
+                        **init_cfg.from_lidar, return_intensity=True, device=self.device
                     )
                 else:
-                    sampled_pts, sampled_color, sampled_time = \
-                        torch.empty(0, 3).to(self.device), torch.empty(0, 3).to(self.device), None
+                    sampled_pts, sampled_color, sampled_time, sampled_intensity = \
+                        torch.empty(0, 3).to(self.device), torch.empty(0, 3).to(self.device), None, None
                 
                 random_pts = []
                 num_near_pts = init_cfg.get('near_randoms', 0)
@@ -110,16 +110,23 @@ class SingleTrainer(BasicTrainer):
                     
                     sampled_pts = torch.cat([sampled_pts, valid_pts], dim=0)
                     sampled_color = torch.cat([sampled_color, torch.rand(valid_pts.shape, ).to(self.device)], dim=0)
+                    if sampled_intensity is not None:
+                        sampled_intensity = torch.cat([
+                            sampled_intensity,
+                            torch.ones(valid_pts.shape[0], 1, device=self.device)
+                        ], dim=0)
                     if sampled_time is not None:
                         sampled_time = torch.cat([sampled_time, torch.zeros(valid_pts.shape[0], 1).to(self.device)], dim=0)
                 
                 if isinstance(model, PeriodicVibrationGaussians):
                     model.create_from_pcd(
-                        init_means=sampled_pts, init_colors=sampled_color, init_times=sampled_time
+                        init_means=sampled_pts, init_colors=sampled_color, init_times=sampled_time,
+                        init_intensity=sampled_intensity
                     )
                 else:
                     model.create_from_pcd(
-                        init_means=sampled_pts, init_colors=sampled_color
+                        init_means=sampled_pts, init_colors=sampled_color,
+                        init_intensity=sampled_intensity
                     )
                 
             logger.info(f"Initialized {class_name} gaussians")

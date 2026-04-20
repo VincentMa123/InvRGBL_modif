@@ -52,12 +52,12 @@ def region_consistency_loss(a, b):
 
     return loss / (count + eps)  # Normalize by number of valid regions
 
-def neighborhood_smoothness_loss(a, b):
+def neighborhood_smoothness_loss(a, b, sigma=1.0):
     dx = b[:, :-1] - b[:, 1:]  
     dy = b[:-1, :] - b[1:, :]  
-    weight_x = torch.exp(- (a[:, :-1] - a[:, 1:]) ** 2)
-    weight_y = torch.exp(- (a[:-1, :] - a[1:, :]) ** 2)
-    loss = (weight_x * dx**2).mean() + (weight_y * dy**2).mean()
+    weight_x = torch.exp(- (a[:, :-1] - a[:, 1:]) ** 2 / (sigma ** 2))
+    weight_y = torch.exp(- (a[:-1, :] - a[1:, :]) ** 2 / (sigma ** 2))
+    loss = (weight_x * torch.abs(dx)).mean() + (weight_y * torch.abs(dy)).mean()
     return loss
 
 # copy from MiDaS

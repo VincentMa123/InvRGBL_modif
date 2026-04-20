@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J training
+#SBATCH -J training_invrgbl
 #SBATCH -p titan
 #SBATCH --qos=titan
 #SBATCH --nodes=1
@@ -18,7 +18,6 @@ conda activate InvRGBL
 
 set -euo pipefail
 
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 
 python -u tools/train.py \
   --config_file configs/invrgbl.yaml \
