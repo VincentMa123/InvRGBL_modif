@@ -279,7 +279,10 @@ class EnvLight(torch.nn.Module):
         #     light = light * self.sky_intensity_scale
         return light.reshape(*shape)
 
-    def get_sun_direction(self):
+    def get_sun_direction(self, override=None):
+        if override is not None:
+            override = torch.as_tensor(override, device=self.device, dtype=torch.float32)
+            return override / override.norm()
         return self.anno_sun_direction.to(device=self.device)
         # canon_light_dxy = self.sun_direction_[:2]
         # canon_light_d = torch.cat([canon_light_dxy, torch.ones(1).to(self.sun_direction.device)])

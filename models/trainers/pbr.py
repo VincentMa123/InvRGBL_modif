@@ -97,7 +97,9 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
 
     global_incident_lights = direct_light_env_light.direct_light(incident_dirs,step) #)
 
-    global_incident_lights = torch.ones_like(global_incident_lights) * torch.tensor([200, 200, 180]).to(device=normals.device) / 255 * 1.5
+    # Allow learned sky_intensity to affect shading instead of hardcoding a constant.
+    # If you need the old hardcoded warm-gray fallback, uncomment the next line:
+    # global_incident_lights = torch.ones_like(global_incident_lights) * torch.tensor([200, 200, 180]).to(device=normals.device) / 255 * 1.5
     local_incident_lights = 0 #eval_sh(deg, incidents.transpose(1, 2).view(-1, 1, 3, (deg + 1) ** 2), incident_dirs).clamp_min(0)
     incident_visibility = visibility_precompute
     # incident_visibility[incident_visibility>0.5] = 1
