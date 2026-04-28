@@ -148,11 +148,17 @@ def main():
     new_sun_dir = None
 
     if args.mode == "night" and sky_model is not None:
-        # Sun below horizon, very dim sky
+        # Night preset: sun below horizon, dim sky dome and dim environment light.
+        # The sky dome is rendered via SH coefficients; the scene is lit via
+        # sky_intensity.  We scale both down together so the sky and ground
+        # stay visually consistent.
         new_sun_dir = torch.tensor([0.0, -1.0, 0.0], device="cuda", dtype=torch.float32)
         sky_model.sun_intensity.data[:] = 0.01
+        # Dim the sky dome SH (was learned for daylight)
+        sky_model.shs.data[:] *= 0.1
+        # Environment light for PBR — ~15 % of the learned daytime value
         sky_model.sky_intensity.data[:] = torch.tensor(
-            [0.03, 0.03, 0.05], device=sky_model.sky_intensity.device, dtype=torch.float32
+            [0.08, 0.08, 0.12], device=sky_model.sky_intensity.device, dtype=torch.float32
         )
     elif args.sun_direction is not None and sky_model is not None:
         new_sun_dir = torch.tensor(
@@ -209,8 +215,6 @@ def main():
 
     # ------------------ Save videos ------------------
     candidate_keys = [
-        "gt_rgbs",
-        "rgbs",
         "rendered_pbr",
         "rendered_albedos",
         "rendered_roughness",

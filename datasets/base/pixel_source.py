@@ -303,8 +303,8 @@ class CameraData(object):
         # normalize the images to [0, 1]
         self.images = images = torch.from_numpy(np.stack(images, axis=0)) / 255
 
-
-        if load_intensity:
+        has_intensity_dir = os.path.isdir(os.path.join(self.data_path, "intensity"))
+        if load_intensity and has_intensity_dir:
             intensity_images = []
             for ix, fname in tqdm(
                 enumerate(self.intensity_filepaths),
@@ -312,6 +312,8 @@ class CameraData(object):
                 dynamic_ncols=True,
                 total=len(self.intensity_filepaths),
             ):
+                if not os.path.exists(fname):
+                    continue
                 intensity = np.load(fname)
                 # resize them to the load_size
                 sparse_array = coo_matrix(intensity[:, :, 0])
@@ -332,8 +334,8 @@ class CameraData(object):
             self.intensity_images = intensity_images = torch.from_numpy(np.stack(intensity_images, axis=0))     
 
 
-        f_path = self.albedo_filepaths[-1]
-        if os.path.exists(f_path):
+        has_albedo_dir = os.path.isdir(os.path.join(self.data_path, "albedo_rgbx"))
+        if has_albedo_dir and len(self.albedo_filepaths) > 0 and os.path.exists(self.albedo_filepaths[0]):
             albedo_images = []
             for ix, fname in tqdm(
                 enumerate(self.albedo_filepaths),
@@ -382,7 +384,8 @@ class CameraData(object):
             self.roughness_images  = roughness_images = torch.from_numpy(np.stack(roughness_images, axis=0))   
             # normalize the images to [0, 1]
 
-            if self.load_shading:
+            has_shading_dir = os.path.isdir(os.path.join(self.data_path, "visibility"))
+            if self.load_shading and has_shading_dir and len(self.shading_filepaths) > 0 and os.path.exists(self.shading_filepaths[0]):
                 shading_images = []
                 for ix, fname in tqdm(
                     enumerate(self.shading_filepaths),
@@ -406,23 +409,28 @@ class CameraData(object):
                 self.shading_images  = shading_images = torch.from_numpy(np.stack(shading_images, axis=0))   
             # normalize the images to [0, 1]
 
-        normal_images = []
-        for ix, fname in tqdm(
-            enumerate(self.normal_filepaths),
-            desc="Loading normal images",
-            dynamic_ncols=True,
-            total=len(self.normal_filepaths),
-        ):
-            normal = - np.load(fname)
+        has_normal_dir = os.path.isdir(os.path.join(self.data_path, "normals"))
+        if has_normal_dir and len(self.normal_filepaths) > 0 and os.path.exists(self.normal_filepaths[0]):
+            normal_images = []
+        else:
+            normal_images = None
+        if normal_images is not None:
+            for ix, fname in tqdm(
+                enumerate(self.normal_filepaths),
+                desc="Loading normal images",
+                dynamic_ncols=True,
+                total=len(self.normal_filepaths),
+            ):
+                normal = - np.load(fname)
 
-            normal = normal @ np.array(self.cam_to_worlds[ix][:3, :3].T)
-            H = normal.shape[0]
-            W = normal.shape[1]
-            normal = cv2.resize(normal, (self.load_size[1],self.load_size[0]), interpolation=cv2.INTER_LINEAR)
-            normal_images.append(normal)
-        # normalize the images to [0, 1]
-        self.normal_images = normal_images = torch.from_numpy(np.stack(normal_images, axis=0)) 
-        self.normal_images = self.normal_images * (1-self.sky_masks.unsqueeze(-1))
+                normal = normal @ np.array(self.cam_to_worlds[ix][:3, :3].T)
+                H = normal.shape[0]
+                W = normal.shape[1]
+                normal = cv2.resize(normal, (self.load_size[1],self.load_size[0]), interpolation=cv2.INTER_LINEAR)
+                normal_images.append(normal)
+            # normalize the images to [0, 1]
+            self.normal_images = normal_images = torch.from_numpy(np.stack(normal_images, axis=0)) 
+            self.normal_images = self.normal_images * (1-self.sky_masks.unsqueeze(-1))
     
     def load_egocar_mask(self):
         """
