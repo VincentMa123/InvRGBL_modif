@@ -1091,7 +1091,8 @@ class BasicTrainer(nn.Module):
                 continue
 
             for k, _ in gs.items():
-                gs_dict[k].append(gs[k])
+                if k in gs_dict:
+                    gs_dict[k].append(gs[k])
         
         for k, v in gs_dict.items():
             gs_dict[k] = torch.cat(v, dim=0)
