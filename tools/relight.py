@@ -155,10 +155,11 @@ def main():
         new_sun_dir = torch.tensor([0.0, -1.0, 0.0], device="cuda", dtype=torch.float32)
         sky_model.sun_intensity.data[:] = 0.01
         # Dim the sky dome SH (was learned for daylight)
-        sky_model.shs.data[:] *= 0.1
-        # Environment light for PBR — ~15 % of the learned daytime value
+        sky_model.shs.data[:] *= 0.15
+        # Environment light for PBR — higher than physically strict so the
+        # scene remains visible after gamma correction.
         sky_model.sky_intensity.data[:] = torch.tensor(
-            [0.08, 0.08, 0.12], device=sky_model.sky_intensity.device, dtype=torch.float32
+            [0.15, 0.15, 0.20], device=sky_model.sky_intensity.device, dtype=torch.float32
         )
     elif args.sun_direction is not None and sky_model is not None:
         new_sun_dir = torch.tensor(
@@ -228,6 +229,13 @@ def main():
     num_timestamps = len(target_dataset) // num_cams if num_cams > 0 else len(target_dataset)
 
     video_path = os.path.join(args.output_dir, f"{args.mode}_{args.render_set}.mp4")
+    # rendered_pbr is linear radiance; apply sRGB gamma so dark scenes are
+    # visible on standard monitors (otherwise values <0.02 look pure black).
+    if "rendered_pbr" in render_results:
+        render_results["rendered_pbr"] = [
+            torch.clamp(img, 0.0, 1.0) ** (1.0 / 2.2) for img in render_results["rendered_pbr"]
+        ]
+
     print(f"Saving video to {video_path}")
 
     save_videos(

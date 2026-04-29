@@ -24,6 +24,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from .pbr import rendering_equation, rendering_equation_lidar
 from models.gaussians.basics import *
 from utils.graphics_utils import sample_incident_rays
+from datasets.base.pixel_source import get_rays
 from models.losses import normal_map_smooth_loss, region_consistency_loss, neighborhood_smoothness_loss
 
 logger = logging.getLogger()
@@ -1063,64 +1064,51 @@ class BasicTrainer(nn.Module):
     def _viewer_render_fn(
         self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
     ):
-        """Callable function for the viewer."""
+        """Callable function for the viewer. Uses the full trainer forward pass."""
         W, H = img_wh
         c2w = camera_state.c2w
         K = camera_state.get_K(img_wh)
         c2w = torch.from_numpy(c2w).float().to(self.device)
         K = torch.from_numpy(K).float().to(self.device)
-        
-        cam = dataclass_camera(
-            camtoworlds=c2w,
-            camtoworlds_gt=c2w,
-            Ks=K,
-            H=H,
-            W=W
+
+        # Build meshgrid for ray generation
+        x, y = torch.meshgrid(
+            torch.arange(W, device=self.device),
+            torch.arange(H, device=self.device),
+            indexing="xy",
         )
-        
-        gs_dict = {
-            "_means": [],
-            "_scales": [],
-            "_quats": [],
-            "_rgbs": [],
-            "_opacities": [],
+        x, y = x.flatten(), y.flatten()
+
+        # Compute ray directions (viewdirs) and origins
+        origins, viewdirs, _ = get_rays(x, y, c2w, K)
+        origins = origins.reshape(H, W, 3)
+        viewdirs = viewdirs.reshape(H, W, 3)
+
+        # Normalized pixel coordinates for Affine model
+        pixel_coords = torch.stack([y.float() / H, x.float() / W], dim=-1).reshape(H, W, 2)
+
+        # Default to first frame for temporal state
+        default_normed_time = self.normalized_timestamps[0] if len(self.normalized_timestamps) > 0 else 0.0
+        normed_time = torch.full((H, W), default_normed_time, dtype=torch.float32, device=self.device)
+        img_idx = torch.zeros((H, W), dtype=torch.long, device=self.device)
+        frame_idx = torch.zeros((H, W), dtype=torch.long, device=self.device)
+
+        image_infos = {
+            "origins": origins,
+            "viewdirs": viewdirs,
+            "pixel_coords": pixel_coords,
+            "normed_time": normed_time,
+            "img_idx": img_idx,
+            "frame_idx": frame_idx,
         }
-        for class_name in ["Background"]:
-            gs = self.models[class_name].get_gaussians(cam)
-            if gs is None:
-                continue
 
-            for k, _ in gs.items():
-                if k in gs_dict:
-                    gs_dict[k].append(gs[k])
-        
-        for k, v in gs_dict.items():
-            gs_dict[k] = torch.cat(v, dim=0)
+        camera_infos = {
+            "camera_to_world": c2w,
+            "intrinsics": K,
+            "height": torch.tensor(H, dtype=torch.long, device=self.device),
+            "width": torch.tensor(W, dtype=torch.long, device=self.device),
+        }
 
-        gs = dataclass_gs(
-            _means=gs_dict["_means"],
-            _scales=gs_dict["_scales"],
-            _quats=gs_dict["_quats"],
-            _rgbs=gs_dict["_rgbs"],
-            _opacities=gs_dict["_opacities"],
-            detach_keys=[],
-            extras=None
-        )
-        
-        render_colors, _, _ = rasterization(
-            means=gs.means,
-            quats=gs.quats,
-            scales=gs.scales,
-            opacities=gs.opacities.squeeze(),
-            colors=gs.rgbs,
-            viewmats=torch.linalg.inv(cam.camtoworlds)[None, ...],  # [C, 4, 4]
-            Ks=cam.Ks[None, ...],  # [C, 3, 3]
-            width=cam.W,
-            height=cam.H,
-            packed=self.render_cfg.packed,
-            absgrad=self.render_cfg.absgrad,
-            sparse_grad=self.render_cfg.sparse_grad,
-            rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
-            radius_clip=4.0,  # skip GSs that have small image radius (in pixels)
-        )
-        return render_colors[0].cpu().numpy()
+        outputs = self(image_infos, camera_infos, novel_view=True)
+        rgb = outputs["rgb"].clamp(0.0, 1.0)
+        return rgb.cpu().numpy()
