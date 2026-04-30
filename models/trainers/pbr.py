@@ -145,6 +145,84 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
 
     return pbr, extra_results
 
+def compute_spotlight_contribution(spotlights, means, normals, albedos, roughness, viewdirs):
+    """
+    Additive spotlight contribution for inference-time relighting.
+    
+    Args:
+        spotlights: list of dicts with keys:
+            - "position": [3] torch.Tensor or list
+            - "intensity": float
+            - "color": [3] torch.Tensor or list (optional, default white)
+            - "direction": [3] torch.Tensor or list (optional, for cone)
+            - "cutoff_angle": float in radians (optional, default pi/6)
+        means: [N, 3] Gaussian centers
+        normals: [N, 3]
+        albedos: [N, 3]
+        roughness: [N, 1]
+        viewdirs: [N, 3]
+    
+    Returns:
+        [N, 3] RGB spotlight contribution
+    """
+    if spotlights is None or len(spotlights) == 0:
+        return torch.zeros_like(albedos)
+    
+    total = torch.zeros_like(albedos)
+    for sl in spotlights:
+        pos = sl["position"]
+        if not torch.is_tensor(pos):
+            pos = torch.tensor(pos, device=means.device, dtype=torch.float32)
+        pos = pos.to(means.device)
+        
+        # Vector from surface point to light
+        pts2l = pos - means  # [N, 3]
+        dist = torch.norm(pts2l, dim=-1, keepdim=True)
+        pts2l = pts2l / (dist + 1e-6)
+        
+        # Distance falloff: inverse-linear with soft epsilon.
+        # Inverse-square (1/dist^2) creates sharp hot-spots and ugly
+        # interference stripes when multiple street-lamp pools overlap.
+        # Inverse-linear (1/(dist+eps)) spreads light much more evenly.
+        falloff = sl["intensity"] / (dist + 5.0)
+        
+        # Angular attenuation for spotlight cone
+        if "direction" in sl and sl["direction"] is not None:
+            direction = sl["direction"]
+            if not torch.is_tensor(direction):
+                direction = torch.tensor(direction, device=means.device, dtype=torch.float32)
+            direction = F.normalize(direction, dim=-1)
+            # cos of angle between -pts2l (vector TO light) and spotlight emission direction
+            cos_theta = (-pts2l * direction).sum(dim=-1, keepdim=True)
+            cutoff = sl.get("cutoff_angle", np.pi / 6.0)
+            cos_cutoff = np.cos(cutoff)
+            # Smooth step inside cone
+            angular_atten = torch.clamp((cos_theta - cos_cutoff) / (1.0 - cos_cutoff + 1e-6), 0.0, 1.0)
+        else:
+            angular_atten = torch.ones_like(dist)
+        
+        # Diffuse BRDF term (without n·l)
+        f_d = albedos / np.pi
+        
+        # Specular BRDF term
+        f_s = GGX_specular(
+            normals, viewdirs, pts2l.unsqueeze(1), roughness, fresnel=0.04
+        ).squeeze(1)  # [N, 3]
+        
+        # n·l for cosine falloff
+        n_dot_l = (normals * pts2l).sum(dim=-1, keepdim=True).clamp(min=0)
+        
+        # Light color
+        color = sl.get("color", torch.ones(3, device=means.device))
+        if not torch.is_tensor(color):
+            color = torch.tensor(color, device=means.device, dtype=torch.float32)
+        color = color.to(means.device)
+        
+        total = total + (f_d + f_s) * n_dot_l * falloff * angular_atten * color
+    
+    return total
+
+
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
     return tuple(copied_tensors)

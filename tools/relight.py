@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import numpy as np
 import os
 import sys
 import types
@@ -59,9 +60,10 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["relight", "night"],
+        choices=["relight", "night", "afternoon", "sunset"],
         default="relight",
-        help="Preset: 'relight' uses custom sun, 'night' disables sun and dims sky",
+        help="Preset: 'relight' uses custom sun, 'night' disables sun and dims sky, "
+             "'afternoon' low warm sun, 'sunset' near-horizon orange sun",
     )
     parser.add_argument(
         "--dataset",
@@ -79,6 +81,12 @@ def main():
         type=int,
         default=10,
         help="FPS for output video",
+    )
+    parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=None,
+        help="Only render the first N images (useful for quick preview)",
     )
     parser.add_argument(
         "opts",
@@ -113,9 +121,24 @@ def main():
 
     # Parse command-line overrides (same syntax as train.py)
     # These are merged LAST so they override dataset defaults.
+    # Remember original timestep range from the saved config so we can warn
+    # if the user tries to override it (that breaks checkpoint loading).
+    orig_start = cfg.data.get("start_timestep", 0)
+    orig_end   = cfg.data.get("end_timestep", -1)
+
     if args.opts is not None:
         opts_cfg = OmegaConf.from_cli(args.opts)
         cfg = OmegaConf.merge(cfg, opts_cfg)
+
+    # Restore timestep range to match the checkpoint; use --max_frames to limit rendering.
+    if cfg.data.get("start_timestep") != orig_start or cfg.data.get("end_timestep") != orig_end:
+        print(
+            f"WARNING: start/end_timestep was overridden in CLI opts. "
+            f"Restoring to training values (start={orig_start}, end={orig_end}) "
+            f"so checkpoint loads correctly. Use --max_frames to preview fewer images."
+        )
+        cfg.data.start_timestep = orig_start
+        cfg.data.end_timestep = orig_end
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -149,18 +172,44 @@ def main():
 
     if args.mode == "night" and sky_model is not None:
         # Night preset: sun below horizon, dim sky dome and dim environment light.
-        # The sky dome is rendered via SH coefficients; the scene is lit via
-        # sky_intensity.  We scale both down together so the sky and ground
-        # stay visually consistent.
-        new_sun_dir = torch.tensor([0.0, -1.0, 0.0], device="cuda", dtype=torch.float32)
-        sky_model.sun_intensity.data[:] = 0.01
-        # Dim the sky dome SH (was learned for daylight)
-        sky_model.shs.data[:] *= 0.15
-        # Environment light for PBR — higher than physically strict so the
-        # scene remains visible after gamma correction.
+        # Coordinate system: Z is UP.  Default sun dir has positive Z, so to put
+        # the sun below the horizon we need negative Z.
+        new_sun_dir = torch.tensor([0.0, 0.0, -1.0], device="cuda", dtype=torch.float32)
+        sky_model.sun_intensity.data[:] = 0.0
+        # Kill the sky dome SH completely so rgb_sky_blend is black.
+        # (scene_graph.py adds rgb_sky_blend to rendered_pbr, so any residual
+        # blue from the learned daytime SH shows up as a "blue dark" sky.)
+        sky_model.shs.data[:] = 0.0
+        # Environment light for PBR — moonlight level (~1-2% of daylight).
         sky_model.sky_intensity.data[:] = torch.tensor(
-            [0.15, 0.15, 0.20], device=sky_model.sky_intensity.device, dtype=torch.float32
+            [0.01, 0.01, 0.015], device=sky_model.sky_intensity.device, dtype=torch.float32
         )
+    elif args.mode == "afternoon" and sky_model is not None:
+        # Afternoon: sun from the opposite side, same elevation, slightly warmer.
+        # Keep the LEARNED sun_intensity (trained for this scene) and only tint it.
+        new_sun_dir = torch.tensor([0.72, 0.65, 0.23], device="cuda", dtype=torch.float32)
+        learned = sky_model.sun_intensity.data.clone()
+        sky_model.sun_intensity.data[:] = learned * torch.tensor(
+            [1.0, 0.95, 0.85], device=learned.device, dtype=torch.float32
+        )  # a touch warmer (less blue)
+        learned_sky = sky_model.sky_intensity.data.clone()
+        sky_model.sky_intensity.data[:] = learned_sky * torch.tensor(
+            [0.95, 0.95, 0.90], device=learned_sky.device, dtype=torch.float32
+        )
+        # Keep learned sky dome SH for natural sky gradient.
+    elif args.mode == "sunset" and sky_model is not None:
+        # Sunset: sun near horizon, dimmer, orange, warm sky.
+        new_sun_dir = torch.tensor([0.4, 0.85, 0.2], device="cuda", dtype=torch.float32)
+        learned = sky_model.sun_intensity.data.clone()
+        sky_model.sun_intensity.data[:] = learned * torch.tensor(
+            [1.1, 0.75, 0.45], device=learned.device, dtype=torch.float32
+        )  # warmer, slightly dimmer overall
+        learned_sky = sky_model.sky_intensity.data.clone()
+        sky_model.sky_intensity.data[:] = learned_sky * torch.tensor(
+            [0.85, 0.70, 0.55], device=learned_sky.device, dtype=torch.float32
+        )  # warm amber ambient
+        # Keep learned sky dome SH — the gradient still looks fine at sunset
+        # (golden-hour ground lighting matters more than sky color).
     elif args.sun_direction is not None and sky_model is not None:
         new_sun_dir = torch.tensor(
             args.sun_direction, device="cuda", dtype=torch.float32
@@ -173,6 +222,66 @@ def main():
         sky_model.sky_intensity.data[:] = torch.tensor(
             args.sky_intensity, device=sky_model.sky_intensity.device, dtype=torch.float32
         )
+
+    # ------------------ Configure spotlights for night mode ------------------
+    if args.mode == "night":
+        spotlights = []
+        
+        # Camera IDs in this codebase are integers (e.g. 0 = front camera).
+        # We pull the trajectory from every available camera and place lights along it.
+        cam_ids = (
+            dataset.pixel_source.camera_list
+            if hasattr(dataset.pixel_source, "camera_list")
+            else []
+        )
+        
+        for cam_id in cam_ids:
+            if cam_id not in dataset.pixel_source.camera_data:
+                continue
+            cam = dataset.pixel_source.camera_data[cam_id]
+            cam_positions = cam.cam_to_worlds[:, :3, 3].cpu().numpy()
+            cam_rights    = cam.cam_to_worlds[:, :3, 0].cpu().numpy()
+            
+            # --- Street lamps along the road ---
+            # Spaced farther apart and with softer falloff so pools blend
+            # instead of creating interference stripes.
+            for i in range(0, len(cam_positions), 20):
+                for side in [-1, 1]:
+                    pos = cam_positions[i] + side * cam_rights[i] * 3.0 + np.array([0.0, 0.0, 15.0])
+                    spotlights.append({
+                        "position": pos.tolist(),
+                        "intensity": 8.0,
+                        "color": [1.0, 0.9, 0.6],
+                        "direction": [0.0, 0.0, -1.0],
+                        "cutoff_angle": 2.0 * np.pi / 3.0,  # 120° for very soft edges
+                    })
+        
+        # If no cameras were found, fall back to fixed scene-corner lamps
+        if len(spotlights) == 0:
+            scene_origin = trainer.scene_origin.cpu().numpy() if torch.is_tensor(trainer.scene_origin) else np.array(trainer.scene_origin)
+            for ox, oy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                spotlights.append({
+                    "position": [scene_origin[0] + ox * 10.0, scene_origin[1] + oy * 10.0, scene_origin[2] + 10.0],
+                    "intensity": 8.0,
+                    "color": [1.0, 0.9, 0.6],
+                    "direction": [0.0, 0.0, -1.0],
+                    "cutoff_angle": 2.0 * np.pi / 3.0,
+                })
+        
+        trainer.spotlights = spotlights
+        print(f"Configured {len(spotlights)} spotlights for night mode.")
+
+    # ------------------ Disable learned affine transform for night PBR ------------------
+    # Afternoon / sunset keep Affine enabled (trained for daylight, helps quality).
+    if args.mode == "night" and "Affine" in trainer.models:
+        # The Affine model was trained to lift daytime renders toward GT photos.
+        # For night relighting it adds a global bias that crushes contrast and
+        # hides spotlights.  Zero its decoder so it becomes identity.
+        for layer in trainer.models['Affine'].decoder:
+            if isinstance(layer, torch.nn.Linear):
+                layer.weight.data.zero_()
+                layer.bias.data.zero_()
+        print("Disabled Affine transform (set to identity).")
 
     # ------------------ Monkey-patch collect_gaussians for relighting ------------------
     if new_sun_dir is not None and trainer.pbr:
@@ -206,12 +315,20 @@ def main():
         else dataset.full_image_set
     )
 
-    print(f"Rendering {args.render_set} set ({len(target_dataset)} images) ...")
+    max_frames = args.max_frames
+    vis_indices = None
+    if max_frames is not None and max_frames < len(target_dataset):
+        vis_indices = list(range(max_frames))
+        print(f"Rendering {args.render_set} set ({max_frames}/{len(target_dataset)} images) ...")
+    else:
+        print(f"Rendering {args.render_set} set ({len(target_dataset)} images) ...")
+
     render_results = render_images(
         trainer=trainer,
         dataset=target_dataset,
         compute_metrics=True,
         compute_error_map=False,
+        vis_indices=vis_indices,
     )
 
     # ------------------ Save videos ------------------
@@ -226,15 +343,27 @@ def main():
     render_keys = [k for k in candidate_keys if k in render_results]
 
     num_cams = dataset.pixel_source.num_cams
-    num_timestamps = len(target_dataset) // num_cams if num_cams > 0 else len(target_dataset)
+    rendered_count = len(vis_indices) if vis_indices is not None else len(target_dataset)
+    num_timestamps = rendered_count // num_cams if num_cams > 0 else rendered_count
 
     video_path = os.path.join(args.output_dir, f"{args.mode}_{args.render_set}.mp4")
     # rendered_pbr is linear radiance; apply sRGB gamma so dark scenes are
     # visible on standard monitors (otherwise values <0.02 look pure black).
     if "rendered_pbr" in render_results:
-        render_results["rendered_pbr"] = [
-            torch.clamp(img, 0.0, 1.0) ** (1.0 / 2.2) for img in render_results["rendered_pbr"]
-        ]
+        from scipy.ndimage import gaussian_filter
+        smoothed = []
+        for img in render_results["rendered_pbr"]:
+            img = np.clip(img, 0.0, 1.0)
+            # Strong blur only for night mode — afternoon/sunset don't have the
+            # stripe problem and should stay sharp.
+            if args.mode == "night":
+                img = gaussian_filter(img, sigma=(2.5, 2.5, 0))
+            # Gamma correction: only for night.  Daytime values are already in a
+            # visible range; gamma would blow them out (x^(1/2.2) > x for x in [0,1]).
+            if args.mode in ("night",):
+                img = img ** (1.0 / 2.2)
+            smoothed.append(img)
+        render_results["rendered_pbr"] = smoothed
 
     print(f"Saving video to {video_path}")
 

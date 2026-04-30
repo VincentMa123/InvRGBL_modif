@@ -21,7 +21,7 @@ from pytorch_msssim import SSIM
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from .pbr import rendering_equation, rendering_equation_lidar
+from .pbr import rendering_equation, rendering_equation_lidar, compute_spotlight_contribution
 from models.gaussians.basics import *
 from utils.graphics_utils import sample_incident_rays
 from datasets.base.pixel_source import get_rays
@@ -143,6 +143,7 @@ class BasicTrainer(nn.Module):
         self.viewer = None
         self.pbr = self.render_cfg.pbr
         self.sun_intensity = 10
+        self.spotlights = None  # inference-time spotlights for relighting
     
     @property
     def in_test_set(self):
@@ -608,6 +609,14 @@ class BasicTrainer(nn.Module):
                     xyz = gs.means,
                     step = self.step,
                     )
+                
+                # Add inference-time spotlights (e.g. headlights, street lamps)
+                if self.spotlights is not None and len(self.spotlights) > 0:
+                    spotlight_color = compute_spotlight_contribution(
+                        self.spotlights, gs.means, normals, albedos, roughness, viewdirs
+                    )
+                    brdf_color = brdf_color + spotlight_color
+                
                 diffuse_light = extra_results["diffuse_light"]
                 incident_sun_light = extra_results["incident_sun_light"]
                 color_feature = torch.cat([color_feature, intensity, brdf_color, diffuse_light, incident_sun_light], dim=-1)
