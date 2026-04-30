@@ -19,14 +19,10 @@ conda activate InvRGBL
 set -euo pipefail
 
 
-python -u tools/train.py \
-  --config_file configs/invrgbl.yaml \
-  --output_root ./work_dirs \
-  --project invrgbl \
-  --run_name waymo023_dyn_1cam \
-  dataset=waymo/1cams \
-  data.data_root=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training \
-  data.scene_idx=23 \
-  data.start_timestep=0 \
-  data.end_timestep=50 \
-  logging.vis_freq=0
+ python -u tools/train.py \
+    --config_file configs/invrgbl.yaml \
+    --output_root ./work_dirs \
+    --project invrgbl \
+    --run_name waymo023_dyn_5cam \
+    --resume_from work_dirs/invrgbl/waymo023_dyn_5cam/checkpoint_15000.pth \
+    dataset=waymo/5cams \
