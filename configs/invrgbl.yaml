@@ -1,22 +1,19 @@
 seed: 0
-dataset: waymo/1cams
-
-# ------------- Trainer ------------ #
 trainer:
   type: models.trainers.MultiTrainer
   freeze_step: 15000
   optim:
     num_iters: 30000
     use_grad_scaler: false
-    cache_buffer_freq: -1 # if > 0, use error based image sampler for training
+    cache_buffer_freq: -1
   render:
-    near_plane: 0.1 # near plane for rendering
-    far_plane: 10000000000.0 # far plane for rendering
-    antialiased: false # whether to use antialiasing for gaussian rendering, supported by gsplat kernel
-    packed: false # whether to use packed rendering, supported by gsplat kernel
-    absgrad: true #true # whether to use absolute gradient for rendering, supported by gsplat kernel
-    sparse_grad: false # whether to use sparse gradient for rendering, supported by gsplat kernel
-    batch_size: 1 # batch size for rendering, currently only support 1
+    near_plane: 0.1
+    far_plane: 10000000000.0
+    antialiased: false
+    packed: false
+    absgrad: true
+    sparse_grad: false
+    batch_size: 1
     pbr: true
   losses:
     rgb:
@@ -25,19 +22,21 @@ trainer:
       w: 0.2
     mask:
       w: 0.05
-      opacity_loss_type: bce   # [bce, safe_bce]
+      opacity_loss_type: bce
     depth:
       w: 0.01
-      inverse_depth: False
-      normalize: False
+      inverse_depth: false
+      normalize: false
       loss_type: l1
       lidar_w_decay: -1
     affine:
-    w: 0.00001
+      w: 1.0e-05
     pbr:
       w: 1.0
     diffuse_light:
       w: 0.001
+    albedo_pre:
+      w: 0.03
     albedo:
       w: 0.01
     roughness:
@@ -49,15 +48,15 @@ trainer:
     sun_visibility:
       w: 0.1
     intensity:
-      w: 1.0
+      w: 0.1
     ref_neighborhood_smoothness:
-      w: 0.05
+      w: 0.01
     ref_region_consistency:
       w: 0.001
     albedo_smooth:
-      w: 0.1
-    ref_region_consistency_albedo:
       w: 0.05
+    ref_region_consistency_albedo:
+      w: 0.2
     gt_normal:
       w: 0.1
     smooth_normal:
@@ -70,13 +69,13 @@ trainer:
       w: 1.0
       start_from: 0
   res_schedule:
-    double_steps: 250 # training starts at 1/d resolution, every n steps this is doubled
-    downscale_times: 2 # at the beginning, resolution is 1/2^d, where d is this number
+    double_steps: 250
+    downscale_times: 2
   gaussian_optim_general_cfg:
     xyz:
-      lr: 1.6e-04
+      lr: 0.00016
       lr_final: 1.6e-06
-      scale_factor: scene_radius # str or float, if "scene_scale", scale the learning rate by the scene scale
+      scale_factor: scene_radius
     sh_dc:
       lr: 0.0025
     sh_rest:
@@ -88,11 +87,14 @@ trainer:
     rotation:
       lr: 0.001
     normal:
-      lr:  1.6e-04
+      lr: 0.00016
     base_color:
       lr: 0.001
     roughness:
       lr: 0.001
+    metallic:
+      lr: 0.001
+      lr_final: 0.0001
     reflectivity:
       lr: 0.001
     sun_visibility:
@@ -102,62 +104,57 @@ trainer:
     incidents_rest:
       lr: 0.0001
   gaussian_ctrl_general_cfg:
-    warmup_steps: 500             # warmup steps for alpha
-    reset_alpha_interval: 3000    # reset alpha every n steps
-    refine_interval: 100          # refine gaussians every n steps
-    sh_degree_interval: 1000      # every n intervals turn on another sh degree
-    n_split_samples: 2            # number of samples to split gaussians into
-    # may differ in different models
-    reset_alpha_value: 0.01       # reset alpha to this value
-    densify_grad_thresh: 0.005  # above this grad, gaussians are densified
-    densify_size_thresh: 0.03   # below this size, gaussians are *duplicated*, otherwise split
-    cull_alpha_thresh: 0.005       # threshold of opacity for culling gaussians
-    cull_scale_thresh: 0.5        # threshold of scale for culling gaussians
-    cull_screen_size: 0.15        # if a gaussian is more than this percent of screen space, cull it
-    split_screen_size: 0.05       # if a gaussian is more than this percent of screen space, split it
-    stop_screen_size_at: 4000     # stop culling/splitting at this step WRT screen size of gaussians
-    stop_split_at: 15000          # stop splitting at this step
-    sh_degree: 3                  # sh degree for gaussians
-
-# ------------- Model ------------ #
+    warmup_steps: 500
+    reset_alpha_interval: 6000
+    refine_interval: 100
+    sh_degree_interval: 1000
+    n_split_samples: 2
+    reset_alpha_value: 0.01
+    densify_grad_thresh: 0.004
+    densify_size_thresh: 0.03
+    cull_alpha_thresh: 0.003
+    cull_scale_thresh: 0.5
+    cull_screen_size: 0.15
+    split_screen_size: 0.04
+    stop_screen_size_at: 8000
+    stop_split_at: 15000
+    sh_degree: 3
 model:
   Background:
     type: models.gaussians.RelightableGaussian
     init:
       from_lidar:
-        num_samples: 800_000
-        return_color: True
-      near_randoms: 0 #100_000
-      far_randoms: 0 #100_000
+        num_samples: 800000
+        return_color: true
+      near_randoms: 0
+      far_randoms: 0
     reg:
       sharp_shape_reg: null
-        # w: 1.
-        # step_interval: 10
-        # max_gauss_ratio: 10.       # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
   RigidNodes:
     type: models.nodes.RelightRigidNodes
     init:
-      instance_max_pts: 5000 # max initial points for each instance
-      only_moving: true # only optimize moving instances
-      traj_length_thres: 1.0 # threshold of trajectory length for moving instances
+      instance_max_pts: 5000
+      only_moving: true
+      traj_length_thres: 1.0
     ctrl:
       cull_scale_thresh: 0.1
-      stop_screen_size_at: 30000
-      stop_split_at: 20000
+      cull_alpha_thresh: 0.01
+      stop_screen_size_at: 4000
+      stop_split_at: 15000
       cull_out_of_bound: true
     reg:
       sharp_shape_reg:
-        w: 1.
+        w: 1.0
         step_interval: 10
-        max_gauss_ratio: 10.
+        max_gauss_ratio: 10.0
       temporal_smooth_reg:
         trans:
-          w: 0.01 # optimal value may vary
-          smooth_range: 5 # no ablation
+          w: 0.01
+          smooth_range: 5
     optim:
       ins_rotation:
-        lr: 0.00001
-        lr_final: 0.000005
+        lr: 1.0e-05
+        lr_final: 5.0e-06
       ins_translation:
         lr: 0.0005
         lr_final: 0.0001
@@ -168,39 +165,77 @@ model:
     optim:
       all:
         lr: 0.01
+  EnvMap:
+    type: models.modules_envmap.EnvironmentMap
+    params:
+      h: 64
+      w: 128
+    optim:
+      all:
+        lr: 0.01
+        lr_final: 0.001
   Affine:
     type: models.modules.AffineTransform
     params:
       embedding_dim: 4
       base_mlp_layer_width: 64
-      pixel_affine: False
+      pixel_affine: false
     optim:
       all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
+        lr: 1.0e-05
+        weight_decay: 1.0e-06
   CamPose:
     type: models.modules.CameraOptModule
     optim:
       all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
-
-# ------------- render ------------ #
+        lr: 1.0e-05
+        weight_decay: 1.0e-06
 render:
-  fps: 10 # frames per second for the main rendered output
-  render_full: True # whether to render full resolution videos
-  render_test: True # whether to render test set
-  render_novel: 
+  fps: 10
+  render_full: true
+  render_test: true
+  render_novel:
     traj_types:
-      - front_center_interp # type of trajectory for novel view synthesis
-    fps: 24 # frames per second for novel view rendering
-  vis_lidar: False # whether to visualize lidar points on ground truth images
-  vis_sky: False # whether to include "rgb_sky" and "rgb_sky_blend" in rendered keys
-  vis_error: False # whether to include "rgb_error_map" in rendered keys
-
-# ------------- logging ------------ #
+    - front_center_interp
+    fps: 24
+  vis_lidar: false
+  vis_sky: false
+  vis_error: false
 logging:
-  vis_freq: 5000 
-  print_freq: 500 
-  saveckpt_freq: 5000 
-  save_seperate_video: True 
+  vis_freq: 5000
+  print_freq: 500
+  saveckpt_freq: 5000
+  save_seperate_video: true
+data:
+  data_root: /lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training
+  dataset: waymo
+  scene_idx: 23
+  start_timestep: 0
+  end_timestep: 50
+  preload_device: cuda
+  pixel_source:
+    type: datasets.waymo.waymo_sourceloader.WaymoPixelSource
+    cameras:
+    - 0
+    downscale_when_loading:
+    - 1
+    downscale: 1
+    undistort: true
+    test_image_stride: 0
+    load_sky_mask: true
+    load_dynamic_mask: true
+    load_objects: true
+    load_smpl: false
+    sampler:
+      buffer_downscale: 8
+      buffer_ratio: 0.5
+      start_enhance_weight: 3
+  lidar_source:
+    type: datasets.waymo.waymo_sourceloader.WaymoLiDARSource
+    load_lidar: true
+    only_use_top_lidar: false
+    truncated_max_range: 80
+    truncated_min_range: -2
+    lidar_downsample_factor: 4
+    lidar_percentile: 0.02
+log_dir: ./work_dirs/invrgbl/waymo023_dyn_1cam_ispbr

@@ -293,7 +293,11 @@ def main(args):
         metric_logger.update(**{"train_metrics/"+k: v.item() for k, v in metric_dict.items()})
         metric_logger.update(**{"train_stats/gaussian_num_" + k: v for k, v in trainer.get_gaussian_count().items()})
         metric_logger.update(**{"losses/"+k: v.item() for k, v in loss_dict.items()})
-        metric_logger.update(**{"train_stats/lr_" + group['name']: group['lr'] for group in trainer.optimizer.param_groups})
+        lr_stats = {"train_stats/lr_" + group['name']: group['lr'] for group in trainer.optimizer.param_groups}
+        for key in list(metric_logger.meters.keys()):
+            if key.startswith("train_stats/lr_") and key not in lr_stats:
+                del metric_logger.meters[key]
+        metric_logger.update(**lr_stats)
         if args.enable_wandb:
             wandb.log({k: v.avg for k, v in metric_logger.meters.items()})
 

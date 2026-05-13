@@ -125,10 +125,14 @@ class RelightRigidNodes(RelightableGaussian):
             #self._normals = Parameter(torch.zeros(init_means.shape[0], 3, device=self.device))
             reflectance = init_colors.mean(dim=-1)[...,None]
             init_colors = torch.cat((init_colors,reflectance),dim=-1)
-            self._base_color = Parameter(init_colors)
-            self._reflectivity = Parameter(torch.zeros(init_means.shape[0], 1, device=self.device))
-            self._roughness = Parameter(torch.ones(init_means.shape[0], 1, device=self.device)) 
-            #self._metallic = Parameter(torch.zeros(init_means.shape[0], 1, device=self.device))  
+            init_colors = init_colors.to(self.device).clamp(1e-4, 1 - 1e-4)
+            self._base_color = Parameter(torch.logit(init_colors))
+            init_reflectivity = torch.full((init_means.shape[0], 1), 0.5, device=self.device)
+            self._reflectivity = Parameter(torch.logit(init_reflectivity.clamp(1e-4, 1 - 1e-4)))
+            init_roughness = torch.full((init_means.shape[0], 1), 0.7, device=self.device)
+            self._roughness = Parameter(torch.logit(init_roughness.clamp(1e-4, 1 - 1e-4)))
+            init_metallic = torch.full((init_means.shape[0], 1), 0.02, device=self.device)
+            self._metallic = Parameter(torch.logit(init_metallic.clamp(1e-4, 1 - 1e-4)))
 
             self.max_sh_degree = 3
             incidents = torch.zeros((init_means.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -212,6 +216,7 @@ class RelightRigidNodes(RelightableGaussian):
                     split_normals,
                     split_base_color,
                     split_roughness,
+                    split_metallic,
                     split_reflectivity,
                     split_sun_visibility,
                     split_incidents_dc,
@@ -234,6 +239,7 @@ class RelightRigidNodes(RelightableGaussian):
                     dup_normals,
                     dup_base_color,
                     dup_roughness,
+                    dup_metallic,
                     dup_reflectivity,
                     dup_sun_visibility,
                     dup_incidents_dc,
@@ -253,6 +259,7 @@ class RelightRigidNodes(RelightableGaussian):
                 self._normals = Parameter(torch.cat([self._normals.detach(), split_normals, dup_normals], dim=0))
                 self._base_color = Parameter(torch.cat([self._base_color.detach(), split_base_color, dup_base_color], dim=0))
                 self._roughness = Parameter(torch.cat([self._roughness.detach(), split_roughness, dup_roughness], dim=0))
+                self._metallic = Parameter(torch.cat([self._metallic.detach(), split_metallic, dup_metallic], dim=0))
                 self._reflectivity = Parameter(torch.cat([self._reflectivity.detach(), split_reflectivity, dup_reflectivity], dim=0))
                 self._sun_visibility = Parameter(torch.cat([self._sun_visibility.detach(), split_sun_visibility, dup_sun_visibility], dim=0))
                 self._incidents_dc = Parameter(torch.cat([self._incidents_dc.detach(), split_incidents_dc, dup_incidents_dc], dim=0))
@@ -329,6 +336,7 @@ class RelightRigidNodes(RelightableGaussian):
         self._base_color = Parameter(self._base_color[~culls].detach())
         self._roughness = Parameter(self._roughness[~culls].detach())
         self._reflectivity = Parameter(self._reflectivity[~culls].detach())
+        self._metallic = Parameter(self._metallic[~culls].detach())
         self._sun_visibility = Parameter(self._sun_visibility[~culls].detach())
         
         self._incidents_dc = Parameter(self._incidents_dc[~culls].detach())
@@ -371,6 +379,7 @@ class RelightRigidNodes(RelightableGaussian):
         new_normal = self._normals[split_mask].repeat(samps, 1)
         new_base_color = self._base_color[split_mask].repeat(samps, 1)
         new_roughness = self._roughness[split_mask].repeat(samps, 1)
+        new_metallic = self._metallic[split_mask].repeat(samps, 1)
         new_reflectivity = self._reflectivity[split_mask].repeat(samps, 1)
         new_sun_visibility = self._sun_visibility[split_mask].repeat(samps, 1)
 
@@ -378,7 +387,7 @@ class RelightRigidNodes(RelightableGaussian):
         new_incidents_rest = self._incidents_rest[split_mask].repeat(samps, 1, 1)
 
 
-        return new_means, new_feature_dc, new_feature_rest, new_opacities, new_scales, new_quats, new_ids, new_normal,new_base_color, new_roughness, new_reflectivity, new_sun_visibility, new_incidents_dc,new_incidents_rest #
+        return new_means, new_feature_dc, new_feature_rest, new_opacities, new_scales, new_quats, new_ids, new_normal,new_base_color, new_roughness, new_metallic, new_reflectivity, new_sun_visibility, new_incidents_dc,new_incidents_rest #
 
     def dup_gaussians(self, dup_mask: torch.Tensor) -> Tuple:
         """
@@ -397,11 +406,12 @@ class RelightRigidNodes(RelightableGaussian):
         dup_normals = self._normals[dup_mask]
         dup_base_color = self._base_color[dup_mask]
         dup_roughness  = self._roughness[dup_mask]
+        dup_metallic = self._metallic[dup_mask]
         dup_reflectivity = self._reflectivity[dup_mask]
         dup_sun_visibility = self._sun_visibility[dup_mask]
         dup_incidents_dc  = self._incidents_dc[dup_mask]
         dup_incidents_rest  = self._incidents_rest[dup_mask]
-        return dup_means, dup_feature_dc, dup_feature_rest, dup_opacities, dup_scales, dup_quats, dup_ids , dup_normals, dup_base_color,dup_roughness,dup_reflectivity,dup_sun_visibility,dup_incidents_dc, dup_incidents_rest #
+        return dup_means, dup_feature_dc, dup_feature_rest, dup_opacities, dup_scales, dup_quats, dup_ids , dup_normals, dup_base_color,dup_roughness,dup_metallic,dup_reflectivity,dup_sun_visibility,dup_incidents_dc, dup_incidents_rest #
 
     def get_out_of_bound_mask(self):
         """
@@ -515,7 +525,6 @@ class RelightRigidNodes(RelightableGaussian):
 
     def get_gaussians(self, cam: dataclass_camera) -> Dict[str, torch.Tensor]:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
-        #filter_mask = (self.point_ids[..., 0] == 0)
         self.filter_mask = filter_mask
         # NOTE: hack here, need to consider a gaussian filter for efficient rendering
         # theta = np.radians(-10)  # 转换为弧度
@@ -550,6 +559,7 @@ class RelightRigidNodes(RelightableGaussian):
         #activated_albedos = activated_albedos
         
         activated_roughness = self.get_roughness
+        activated_metallic = self.get_metallic
         activated_reflectivity = self.get_reflectivity
         activated_sun_visibility = self.get_sun_visibility
         activated_incidents = self.get_incidents
@@ -564,6 +574,7 @@ class RelightRigidNodes(RelightableGaussian):
             _normals = world_normals[filter_mask],
             _albedos = activated_albedos[filter_mask],
             _roughness = activated_roughness[filter_mask],
+            _metallic = activated_metallic[filter_mask],
             _reflectivity = activated_reflectivity[filter_mask],
             _sun_visibility = activated_sun_visibility[filter_mask],
             _incidents = activated_incidents[filter_mask],

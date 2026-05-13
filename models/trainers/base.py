@@ -21,7 +21,7 @@ from pytorch_msssim import SSIM
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from .pbr import rendering_equation, rendering_equation_lidar, compute_spotlight_contribution
+from .pbr import rendering_equation, rendering_equation_lidar, compute_spotlight_contribution, image_space_pbr
 from models.gaussians.basics import *
 from utils.graphics_utils import sample_incident_rays
 from datasets.base.pixel_source import get_rays
@@ -119,10 +119,25 @@ class BasicTrainer(nn.Module):
         # init models
         self.models = {}
         self.misc_classes_keys = [
-            'Sky', 'Affine', 'CamPose', 'CamPosePerturb'
+            'Sky', 'Affine', 'CamPose', 'CamPosePerturb', 'EnvMap'
         ]
         self.gaussian_classes = {}
         self._init_models()
+        
+        # background color
+        self.back_color = torch.zeros(3).to(self.device)
+        # for evaluation
+        self.cur_frame = torch.tensor(0, device=self.device)
+        self.test_set_indices = test_set_indices # will be override
+        # a simple viewer for background visualization
+        self.viewer = None
+        self.pbr = self.render_cfg.pbr
+        
+        # Add environment map for PBR if not already created by config
+        if self.pbr and 'EnvMap' not in self.models:
+            from models.modules_envmap import EnvironmentMap
+            self.models['EnvMap'] = EnvironmentMap(h=32, w=64).to(self.device)
+        
         self.pts_labels = None # will be overwritten in forward
         self.render_dynamic_mask = False
         
@@ -134,14 +149,6 @@ class BasicTrainer(nn.Module):
         self.ssim = SSIM(data_range=1.0, size_average=True, channel=3).to(self.device)
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True).to(self.device)
         self.step = 0
-        # background color
-        self.back_color = torch.zeros(3).to(self.device)
-        # for evaluation
-        self.cur_frame = torch.tensor(0, device=self.device)
-        self.test_set_indices = test_set_indices # will be override
-        # a simple viewer for background visualization
-        self.viewer = None
-        self.pbr = self.render_cfg.pbr
         self.sun_intensity = 10
         self.spotlights = None  # inference-time spotlights for relighting
     
@@ -200,12 +207,22 @@ class BasicTrainer(nn.Module):
         groups = []
         lr_schedulers = {}
         for params_name, params in self.param_groups.items():
+            params = [param for param in params if param.requires_grad]
+            if len(params) == 0:
+                continue
             class_name = params_name.split("#")[0]
             component_name = params_name.split("#")[1]
             class_cfg = self.model_config.get(class_name)
-            class_optim_cfg = class_cfg["optim"]
             
-            raw_optim_cfg = class_optim_cfg.get(component_name, None)
+            if class_cfg is not None and "optim" in class_cfg:
+                class_optim_cfg = class_cfg["optim"]
+                raw_optim_cfg = class_optim_cfg.get(component_name, None)
+            else:
+                # Fallback for models not in config (e.g. EnvMap added at runtime)
+                raw_optim_cfg = {"lr": 0.001, "lr_final": 0.0001, "max_steps": self.num_iters}
+            
+            if raw_optim_cfg is None:
+                raw_optim_cfg = {"lr": 0.001, "lr_final": 0.0001, "max_steps": self.num_iters}
 
             lr_scale_factor = raw_optim_cfg.get("scale_factor", 1.0)
             if isinstance(lr_scale_factor, str) and lr_scale_factor == "scene_radius":
@@ -285,10 +302,10 @@ class BasicTrainer(nn.Module):
                 incident_visibility_results = []
                 incident_dirs_results = []
                 incident_areas_results = []
-                sample_num = 24
+                sample_num = getattr(self, 'visibility_sample_num', 24)
                 chunk_size = gaussians_xyz.shape[0]
                 for offset in tqdm(range(0, gaussians_xyz.shape[0], chunk_size), "Update visibility with raytracing."):
-                    incident_dirs, incident_areas = sample_incident_rays(gaussians_normal[offset:offset + chunk_size], True,
+                    incident_dirs, incident_areas = sample_incident_rays(gaussians_normal[offset:offset + chunk_size], self.training,
                                                             sample_num-1) #-1 TODO
 
                     if sun_direction is not None:
@@ -318,11 +335,25 @@ class BasicTrainer(nn.Module):
                     del self._visibility_tracings_list[self.cur_frame.item()]
                     del self._incident_dirs_list[self.cur_frame.item()]
                     del self._incident_areas_list[self.cur_frame.item()]
-                self._visibility_tracings_list.update({self.cur_frame.item(): incident_visibility_result.detach()})
-                self._incident_dirs_list.update({self.cur_frame.item(): incident_dirs_result.detach()})
-                self._incident_areas_list.update({self.cur_frame.item(): incident_areas_result.detach()}) 
+                self._visibility_tracings_list.update({self.cur_frame.item(): incident_visibility_result.detach().cpu()})
+                self._incident_dirs_list.update({self.cur_frame.item(): incident_dirs_result.detach().cpu()})
+                self._incident_areas_list.update({self.cur_frame.item(): incident_areas_result.detach().cpu()}) 
         #del raytracer
 
+    def rebuild_all_visibility(self, num_frames: int, sun_direction=None):
+        """Rebuild BVH visibility caches for all frames at current model state.
+        
+        This ensures temporal consistency in rendered_pbr during eval.
+        """
+        logger.info(f"Rebuilding visibility caches for all {num_frames} frames...")
+        # Clear old caches
+        self._visibility_tracings_list.clear()
+        self._incident_dirs_list.clear()
+        self._incident_areas_list.clear()
+        for t in range(num_frames):
+            self.cur_frame = torch.tensor(t, device=self.device)
+            self.update_visibility(update=True, sun_direction=sun_direction)
+        logger.info("Visibility cache rebuild complete.")
 
     def reinitialize_optimizer(self,train_sky=False,train_incident=False,train_vis=False) -> None:
         # get param groups first
@@ -350,12 +381,21 @@ class BasicTrainer(nn.Module):
         groups = []
         lr_schedulers = {}
         for params_name, params in self.param_groups.items():
+            params = [param for param in params if param.requires_grad]
+            if len(params) == 0:
+                continue
             class_name = params_name.split("#")[0]
             component_name = params_name.split("#")[1]
             class_cfg = self.model_config.get(class_name)
-            class_optim_cfg = class_cfg["optim"]
-
-            raw_optim_cfg = class_optim_cfg.get(component_name, None)
+            
+            if class_cfg is not None and "optim" in class_cfg:
+                class_optim_cfg = class_cfg["optim"]
+                raw_optim_cfg = class_optim_cfg.get(component_name, None)
+            else:
+                raw_optim_cfg = {"lr": 0.001}
+            
+            if raw_optim_cfg is None:
+                raw_optim_cfg = {"lr": 0.001}
 
             lr_scale_factor = raw_optim_cfg.get("scale_factor", 1.0)
             if isinstance(lr_scale_factor, str) and lr_scale_factor == "scene_radius":
@@ -382,6 +422,100 @@ class BasicTrainer(nn.Module):
         # self.lr_schedulers = lr_schedulers
         # self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.optim_general.get("use_grad_scaler", False))
     
+    def freeze_stage2_fixed_gaussian_params(self) -> None:
+        """Freeze geometry/topology and fixed intrinsic params for stage-2 fitting."""
+        frozen_attrs = (
+            "_means",
+            "_scales",
+            "_quats",
+            "_opacities",
+            "_features_dc",
+            "_features_rest",
+            "_normals",
+            "_roughness",
+            "_metallic",
+            "_sun_visibility",
+            "instances_quats",
+            "instances_trans",
+        )
+        frozen_report = []
+        trainable_report = []
+        for class_name in self.gaussian_classes.keys():
+            model = self.models[class_name]
+            for attr_name in frozen_attrs:
+                param = getattr(model, attr_name, None)
+                if param is not None:
+                    param.requires_grad_(False)
+                    frozen_report.append(f"{class_name}.{attr_name}")
+            for attr_name in ("_base_color", "_reflectivity"):
+                param = getattr(model, attr_name, None)
+                if param is not None and param.requires_grad:
+                    trainable_report.append(f"{class_name}.{attr_name}")
+        logger.info(
+            "Stage 2 frozen Gaussian params: %s",
+            ", ".join(frozen_report) if frozen_report else "none",
+        )
+        logger.info(
+            "Stage 2 trainable Gaussian material params: %s",
+            ", ".join(trainable_report) if trainable_report else "none",
+        )
+
+    def validate_stage2_optimizer(self) -> None:
+        """Make Stage 2 optimizer contents explicit and fail on frozen groups."""
+        active_groups = [group.get("name", "unnamed") for group in self.optimizer.param_groups]
+        logger.info(
+            "Stage 2 active optimizer groups: %s",
+            ", ".join(active_groups) if active_groups else "none",
+        )
+        frozen_components = {
+            "xyz",
+            "sh_dc",
+            "sh_rest",
+            "opacity",
+            "scaling",
+            "rotation",
+            "normal",
+            "roughness",
+            "metallic",
+            "sun_visibility",
+            "ins_rotation",
+            "ins_translation",
+        }
+        bad_groups = []
+        for group_name in active_groups:
+            parts = group_name.split("#", 1)
+            if len(parts) != 2:
+                continue
+            class_name, component_name = parts
+            if class_name in self.gaussian_classes and component_name in frozen_components:
+                bad_groups.append(group_name)
+        if bad_groups:
+            raise RuntimeError(
+                "Stage 2 optimizer still contains frozen parameter groups: "
+                + ", ".join(bad_groups)
+            )
+
+    def final_cull_before_freeze(self) -> None:
+        """Run one last opacity/scale cull before Stage 2 freezes topology."""
+        for class_name in self.gaussian_classes.keys():
+            model = self.models[class_name]
+            if not hasattr(model, "cull_gaussians"):
+                continue
+            if getattr(model, "max_2Dsize", None) is None and hasattr(model, "_means"):
+                model.max_2Dsize = torch.zeros(
+                    model.num_points,
+                    device=model._means.device,
+                    dtype=torch.float32,
+                )
+            n_before = model.num_points
+            model.cull_gaussians()
+            logger.info(
+                "Stage 2 final cull %s: %d -> %d",
+                class_name,
+                n_before,
+                model.num_points,
+            )
+
 
     def _init_losses(self) -> None:
         sky_opacity_loss_fn = None
@@ -426,40 +560,45 @@ class BasicTrainer(nn.Module):
             self.tic = time.time()
         
     def postprocess_per_train_step(self, step: int) -> None:
-        if step < self.freeze_step:   
-            radii = self.info["radii"]
-            if self.render_cfg.absgrad:
-                grads = self.info["means2d"].absgrad.clone()
-            else:
-                grads = self.info["means2d"].grad.clone()
-            if len(grads.shape)<3:
-                grads = grads.unsqueeze(0)
-            
-            grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
-            grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
-            
-            for class_name in self.gaussian_classes.keys():
-                gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-                self.models[class_name].postprocess_per_train_step(
-                    step=step,
-                    optimizer=self.optimizer,
-                    radii=radii[0, gaussian_mask],
-                    xys_grad=grads[0, gaussian_mask],
-                    last_size=max(self.info["width"], self.info["height"])
-                )
-
-            del grads
-
-        else: 
+        # Stage 2 follows the supplement: stop topology updates, fix geometry,
+        # opacity, and fixed intrinsic params, then refine RGB/LiDAR albedo and
+        # lighting with the consistency losses.
+        if step >= self.freeze_step:
             if not self.freezed:
-                print('freeze GS parameters, focus on lighting more')
-                for class_name in self.gaussian_classes.keys():
-                    gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-                    for param in self.models[class_name].parameters():
-                        param.requires_grad = False 
-                self.reinitialize_optimizer(train_sky=True)
+                print('Stage 2: freezing geometry, opacity, normals/roughness/metallic; training albedo, reflectivity, and lighting')
+                self.final_cull_before_freeze()
+                self.freeze_stage2_fixed_gaussian_params()
+                self.initialize_optimizer()
+                self.validate_stage2_optimizer()
                 self.freezed = True
-            
+            if self.viewer is not None:
+                self.viewer.lock.release()
+            return
+
+        # Stage 1 Gaussian post-processing: split/clone/cull/opacity reset.
+        radii = self.info["radii"]
+        if self.render_cfg.absgrad:
+            grads = self.info["means2d"].absgrad.clone()
+        else:
+            grads = self.info["means2d"].grad.clone()
+        if len(grads.shape)<3:
+            grads = grads.unsqueeze(0)
+        
+        grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
+        grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
+        
+        for class_name in self.gaussian_classes.keys():
+            gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
+            self.models[class_name].postprocess_per_train_step(
+                step=step,
+                optimizer=self.optimizer,
+                radii=radii[0, gaussian_mask],
+                xys_grad=grads[0, gaussian_mask],
+                last_size=max(self.info["width"], self.info["height"])
+            )
+
+        del grads
+
         # viewer
         if self.viewer is not None:
             num_train_rays_per_step = self.render_cfg.batch_size * self.info["width"] * self.info["height"]
@@ -519,14 +658,18 @@ class BasicTrainer(nn.Module):
             "class_labels": [],
         }
         
-        if (self.step > self.freeze_step) and (self.step % 100 == 1):
-            update = random.random() < 0.01   
-        
-        self.update_visibility(update=update, sun_direction=sun_direction)
+        # Skip BVH visibility tracing during training when image-space PBR is active.
+        # The old per-Gaussian PBR (which needs BVH caches) is bypassed in render_gaussians().
+        use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
+        if not use_ispbr_train:
+            if (self.step > self.freeze_step) and (self.step % 100 == 1):
+                update = random.random() < 0.01   
+            
+            self.update_visibility(update=update, sun_direction=sun_direction)
 
 
         if self.pbr:
-            gs_dict.update({"_normals":[], "_albedos":[],"_roughness":[],"_reflectivity":[],"_sun_visibility":[]})
+            gs_dict.update({"_normals":[], "_albedos":[],"_roughness":[],"_metallic":[],"_reflectivity":[],"_sun_visibility":[]})
             gs_dict.update({"_incidents":[]}) 
 
         for class_name in self.gaussian_classes.keys():
@@ -550,12 +693,22 @@ class BasicTrainer(nn.Module):
 
         extras = None
         if self.pbr:
-            extras = {'normals':gs_dict["_normals"],"albedos":gs_dict["_albedos"],"roughness":gs_dict["_roughness"], "reflectivity":gs_dict["_reflectivity"], "_incidents":gs_dict["_incidents"]}
-            extras.update({
-                '_incident_dirs':self._incident_dirs_list[self.cur_frame.item()],
-                            '_visibility_tracing':self._visibility_tracings_list[self.cur_frame.item()], #list(self._visibility_tracings_list.values())
-                            '_incident_areas':self._incident_areas_list[self.cur_frame.item()],
-                "sun_visibility":gs_dict["_sun_visibility"]})
+            extras = {'normals':gs_dict["_normals"],"albedos":gs_dict["_albedos"],"roughness":gs_dict["_roughness"], "metallic":gs_dict["_metallic"], "reflectivity":gs_dict["_reflectivity"], "_incidents":gs_dict["_incidents"]}
+            use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
+            if use_ispbr_train:
+                # BVH caches are not built during training; provide dummy tensors
+                num_pts = gs_dict["_means"].shape[0]
+                extras.update({
+                    '_incident_dirs': torch.zeros(num_pts, 1, 3, device=self.device),
+                    '_visibility_tracing': torch.ones(num_pts, 1, device=self.device),
+                    '_incident_areas': torch.ones(num_pts, 1, 1, device=self.device),
+                    "sun_visibility": gs_dict["_sun_visibility"]})
+            else:
+                extras.update({
+                    '_incident_dirs':self._incident_dirs_list[self.cur_frame.item()].to(self.device),
+                                '_visibility_tracing':self._visibility_tracings_list[self.cur_frame.item()].to(self.device),
+                                '_incident_areas':self._incident_areas_list[self.cur_frame.item()].to(self.device),
+                    "sun_visibility":gs_dict["_sun_visibility"]})
 
 
         gaussians = dataclass_gs(
@@ -589,36 +742,46 @@ class BasicTrainer(nn.Module):
                 normals = gs.extras['normals']
                 albedos = gs.extras['albedos']
                 roughness = gs.extras['roughness']
+                metallic = gs.extras['metallic']
                 reflectivity = gs.extras['reflectivity']
                 sun_visibility = gs.extras['sun_visibility']
                 incidents = gs.extras['_incidents']
 
-                color_feature = torch.cat([color_feature, normals, albedos, roughness,reflectivity,sun_visibility], dim=-1)
+                color_feature = torch.cat([color_feature, normals, albedos, roughness, metallic, reflectivity, sun_visibility], dim=-1)
 
                 #assert direct_light_env_light is not None
                 intensity = rendering_equation_lidar(reflectivity,roughness,normals.detach(), viewdirs,view_dists.detach())
 
-                brdf_color, extra_results = rendering_equation(
-                    base_color = albedos, roughness = roughness, normals = normals.detach(), viewdirs = viewdirs,
-                    incidents = incidents,
-                    direct_light_env_light = direct_light_env_light,
-                    incident_dirs = gs.extras['_incident_dirs'],
-                    incident_areas = gs.extras['_incident_areas'],
-                    visibility_precompute = gs.extras['_visibility_tracing'], 
-                    sun_visibility = sun_visibility, #self.sun_visibility, #,
-                    xyz = gs.means,
-                    step = self.step,
-                    )
-                
-                # Add inference-time spotlights (e.g. headlights, street lamps)
-                if self.spotlights is not None and len(self.spotlights) > 0:
-                    spotlight_color = compute_spotlight_contribution(
-                        self.spotlights, gs.means, normals, albedos, roughness, viewdirs
-                    )
-                    brdf_color = brdf_color + spotlight_color
-                
-                diffuse_light = extra_results["diffuse_light"]
-                incident_sun_light = extra_results["incident_sun_light"]
+                # Skip expensive per-Gaussian PBR during training when image-space PBR is active.
+                # This avoids BVH ray-tracing and old MC shading overhead.
+                use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
+                if use_ispbr_train:
+                    # Dummy channels to maintain rasterizer split structure
+                    brdf_color = torch.zeros_like(albedos)
+                    diffuse_light = torch.zeros_like(albedos)
+                    incident_sun_light = torch.zeros_like(albedos)
+                else:
+                    brdf_color, extra_results = rendering_equation(
+                        base_color = albedos, roughness = roughness, normals = normals.detach(), viewdirs = viewdirs,
+                        incidents = incidents,
+                        direct_light_env_light = direct_light_env_light,
+                        incident_dirs = gs.extras['_incident_dirs'],
+                        incident_areas = gs.extras['_incident_areas'],
+                        visibility_precompute = gs.extras['_visibility_tracing'], 
+                        sun_visibility = sun_visibility, #self.sun_visibility, #,
+                        xyz = gs.means,
+                        step = self.step,
+                        )
+                    
+                    # Add inference-time spotlights (e.g. headlights, street lamps)
+                    if self.spotlights is not None and len(self.spotlights) > 0:
+                        spotlight_color = compute_spotlight_contribution(
+                            self.spotlights, gs.means, normals, albedos, roughness, viewdirs
+                        )
+                        brdf_color = brdf_color + spotlight_color
+                    
+                    diffuse_light = extra_results["diffuse_light"]
+                    incident_sun_light = extra_results["incident_sun_light"]
                 color_feature = torch.cat([color_feature, intensity, brdf_color, diffuse_light, incident_sun_light], dim=-1)
 
 
@@ -643,12 +806,85 @@ class BasicTrainer(nn.Module):
             assert self.render_cfg.batch_size == 1, "batch size must be 1, will support batch size > 1 in the future"
             
             if self.pbr:
-                rendered_rgb,rendered_normal,rendered_albedos,rendered_roughness, rendered_reflectivity, \
+                rendered_rgb,rendered_normal,rendered_albedos,rendered_roughness, rendered_metallic, rendered_reflectivity, \
                 rendered_sun_visibility, rendered_intensity, rendered_pbr, diffuse_light, incident_sun_light, rendered_depth = \
-                 torch.split(renders, [3,3,3,1,1,1,1,3,3,3,1], dim=-1)              
+                 torch.split(renders, [3,3,3,1,1,1,1,1,3,3,3,1], dim=-1)              
+                
+                # ---- Image-space PBR with environment map ----
+                # Intrinsic material properties are optimized during both
+                # stages; RGB-LiDAR consistency is introduced after freeze.
+                if (
+                    'EnvMap' in self.models
+                    and 'Sky' in self.models
+                ):
+                    device = renders.device
+                    H, W = cam.H, cam.W
+                    
+                    # Compute per-pixel view directions from camera
+                    # NOTE: must match rasterizer output shape [H, W]. Use indexing='ij'.
+                    py, px = torch.meshgrid(
+                        torch.arange(H, device=device, dtype=torch.float32),
+                        torch.arange(W, device=device, dtype=torch.float32),
+                        indexing='ij'
+                    )
+                    fx, fy = cam.Ks[0, 0], cam.Ks[1, 1]
+                    cx, cy = cam.Ks[0, 2], cam.Ks[1, 2]
+                    dirs = torch.stack([
+                        (px - cx + 0.5) / fx,
+                        (py - cy + 0.5) / fy,
+                        torch.ones_like(px)
+                    ], dim=-1)  # [H, W, 3]
+                    # Transform to world space: dirs @ R^T
+                    rays_world = dirs @ cam.camtoworlds[:3, :3].T  # [H, W, 3]
+                    viewdirs_img = F.normalize(rays_world, dim=-1)
+                    means_map = cam.camtoworlds[:3, 3].view(1, 1, 3) + rays_world * rendered_depth
+                    
+                    env_map = self.models['EnvMap']
+                    sky = self.models['Sky']
+                    sun_dir = sky.get_sun_direction()
+                    sun_intensity = sky.sun_intensity
+                    
+                    # Rebuild env map mips. During training, base is optimized every step
+                    # so we rebuild every step. During eval we can skip if already built.
+                    # Also rebuild if device changed (e.g. CPU->CUDA after __init__).
+                    need_build = self.training or getattr(env_map, 'num_mips', 0) == 0
+                    if not need_build and len(env_map.specular) > 0:
+                        need_build = env_map.specular[0].device != renders.device
+                    if need_build:
+                        env_map.build_mips()
+                    
+                    # Training roughness floor: prevent glossy cheat on matte surfaces.
+                    # During training use a softer floor (0.15) than relighting (0.30-0.50)
+                    # so cars/windows can still learn shininess, but roads stay matte.
+                    train_min_roughness = getattr(self, 'relight_min_roughness', 0.15)
+                    if self.training:
+                        train_min_roughness = min(train_min_roughness, 0.15)
+                    
+                    pbr_rgb = image_space_pbr(
+                        albedo_map=rendered_albedos,
+                        normal_map=rendered_normal,
+                        roughness_map=rendered_roughness,
+                        metallic_map=torch.zeros_like(rendered_metallic)
+                        if (not self.training and getattr(self, "relight_force_dielectric", False))
+                        else rendered_metallic,
+                        sunvis_map=rendered_sun_visibility,
+                        viewdir_map=viewdirs_img,
+                        env_map=env_map,
+                        sun_dir=sun_dir,
+                        sun_intensity=sun_intensity,
+                        spotlights=self.spotlights if not self.training else None,
+                        depth_map=rendered_depth,
+                        means_map=means_map,
+                        min_roughness=train_min_roughness,
+                        reflectivity_map=rendered_reflectivity,
+                    )
+
+                    rendered_rgb = pbr_rgb
+                
                 info.update({'rendered_normal':rendered_normal,
                             'rendered_albedos':rendered_albedos,
                             'rendered_roughness':rendered_roughness,
+                            'rendered_metallic':rendered_metallic,
                             'rendered_reflectivity':rendered_reflectivity,
                             'rendered_pbr': rendered_pbr,
                             'diffuse_light':diffuse_light,
@@ -678,6 +914,7 @@ class BasicTrainer(nn.Module):
             results.update({'rendered_normal':self.info['rendered_normal'],
             'rendered_albedos':self.info['rendered_albedos'],
             'rendered_roughness':self.info['rendered_roughness'],
+            'rendered_metallic':self.info['rendered_metallic'],
             'rendered_reflectivity':self.info['rendered_reflectivity'],
             'rendered_pbr':self.info['rendered_pbr'],
             'rendered_intensity':self.info['rendered_intensity'],
@@ -752,10 +989,12 @@ class BasicTrainer(nn.Module):
         sky_model = self.models['Sky']
         outputs["rgb_sky"] = sky_model(image_infos)
         outputs["rgb_sky_blend"] = outputs["rgb_sky"] * (1.0 - outputs["opacity"])
+
+        rgb_blended = outputs["rgb_gaussians"] + outputs["rgb_sky"] * (1.0 - outputs["opacity"])
         
         # affine transformation
         outputs["rgb"] = self.affine_transformation(
-            outputs["rgb_gaussians"] + outputs["rgb_sky"] * (1.0 - outputs["opacity"]), image_infos
+            rgb_blended, image_infos
         )
         
         return outputs
@@ -837,8 +1076,12 @@ class BasicTrainer(nn.Module):
             depth_loss = self.get_loss_weight("depth") * depth_loss * decay_weight
             loss_dict["depth_loss"] = depth_loss
 
-        # diffusion priors and smoothness (both stages)
-        if "roughness_images" in image_infos:
+        stage2_active = self.step > self.freeze_step
+
+        # Material priors are active in Stage 1. After freeze, roughness,
+        # normals, metallic, and sun visibility are fixed; RGB/LiDAR albedo and
+        # lighting continue to train through RGB and consistency losses.
+        if not stage2_active and "roughness_images" in image_infos:
             roughness_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
             rendered_roughness = outputs["rendered_roughness"] * roughness_images_mask
             gt_roughness = image_infos["roughness_images"] * roughness_images_mask
@@ -848,7 +1091,7 @@ class BasicTrainer(nn.Module):
             smooth_roughness_loss = normal_map_smooth_loss(rendered_roughness[None,...])
             loss_dict["smooth_roughness_loss"] = self.get_loss_weight("smooth_roughness") * smooth_roughness_loss
 
-        if "shading_images" in image_infos:
+        if not stage2_active and "shading_images" in image_infos:
             images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
             rendered_sun_visibility = outputs["rendered_sun_visibility"] * images_mask
             gt_sun_visibility = image_infos["shading_images"] * images_mask
@@ -868,12 +1111,22 @@ class BasicTrainer(nn.Module):
             loss_dict["albedo_smooth_loss"] = self.get_loss_weight("albedo_smooth") * albedo_smooth_loss
 
             Ll1_albedo = torch.abs(gt_albedo - predicted_albedo).mean()
-            if self.step > self.freeze_step:
+            if stage2_active:
                 loss_dict["albedo_loss"] = self.get_loss_weight("albedo") * Ll1_albedo
             else:
                 loss_dict["albedo_loss"] = self.get_loss_weight("albedo_pre") * Ll1_albedo
+            
+            # Metallic consistency: bright albedo should be non-metallic (diffuse).
+            # This prevents the model from cheating with metallic+dark_albedo on white cars.
+            if not stage2_active and "rendered_metallic" in outputs and "rendered_roughness" in outputs:
+                metallic_map = outputs["rendered_metallic"] * albedo_images_mask
+                roughness_map = outputs["rendered_roughness"] * albedo_images_mask
+                albedo_brightness = predicted_albedo.mean(dim=-1, keepdim=True)
+                # Penalize metallic when albedo is bright AND roughness is high (diffuse-like)
+                metallic_consistency = (metallic_map * albedo_brightness * roughness_map).mean()
+                loss_dict["metallic_consistency"] = 0.05 * metallic_consistency
 
-        if "normal_images" in image_infos:
+        if not stage2_active and "normal_images" in image_infos:
             normal_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
             normal_images = image_infos['normal_images'] * normal_images_mask
             predicted_normal = outputs["rendered_normal"] * normal_images_mask
@@ -912,13 +1165,14 @@ class BasicTrainer(nn.Module):
         # ------------------------------
         # Stage 2 specific losses
         # ------------------------------
-        if self.step > self.freeze_step:
-            if "rendered_pbr" in outputs:
+        use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
+        if stage2_active:
+            if not use_ispbr_train and "rendered_pbr" in outputs:
                 rendered_pbr = outputs["rendered_pbr"] * valid_loss_mask[..., None]
                 Ll1_pbr = torch.abs(rendered_pbr - gt_rgb).mean()
                 loss_dict["pbr_loss"] = self.get_loss_weight("pbr") * Ll1_pbr
 
-            if "diffuse_light" in outputs:
+            if not use_ispbr_train and "diffuse_light" in outputs:
                 diffuse_light = outputs["diffuse_light"]
                 mean_light = diffuse_light.mean(-1, keepdim=True).expand_as(diffuse_light)
                 loss_light = F.l1_loss(diffuse_light, mean_light)
@@ -940,8 +1194,11 @@ class BasicTrainer(nn.Module):
                 loss_dict["ref_neighborhood_smoothness_loss"] = self.get_loss_weight("ref_neighborhood_smoothness") * ref_neighborhood_smoothness_loss
 
                 predicted_albedo = outputs["rendered_albedos"] * images_mask
-                ref_region_consistency_loss = self.region_consistency_loss(rendered_reflectivity.detach(), predicted_albedo.mean(dim=-1))
-                loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency_albedo") * ref_region_consistency_loss
+                # Skip expensive CPU-based SLIC segmentation when image-space PBR is active.
+                # region_consistency_loss calls slic() on CPU every step (~1.4s/step).
+                if not use_ispbr_train:
+                    ref_region_consistency_loss = self.region_consistency_loss(rendered_reflectivity.detach(), predicted_albedo.mean(dim=-1))
+                    loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency_albedo") * ref_region_consistency_loss
 
         # dynamic region loss
         dynamic_region_cfg = self.losses_dict.get("dynamic_region", None)
@@ -1031,6 +1288,14 @@ class BasicTrainer(nn.Module):
             logger.info(f"{class_name}: {msg}")
         msg = super().load_state_dict(state_dict, strict)
         logger.info(f"BasicTrainer: {msg}")
+        if self.step >= self.freeze_step:
+            logger.info("Checkpoint step is in Stage 2; applying freeze schedule before optimizer setup")
+            self.freeze_stage2_fixed_gaussian_params()
+            self.initialize_optimizer()
+            self.validate_stage2_optimizer()
+            self.freezed = True
+        else:
+            self.freezed = False
         
     def resume_from_checkpoint(
         self,

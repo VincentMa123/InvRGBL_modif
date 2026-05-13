@@ -261,11 +261,13 @@ class MultiTrainer(BasicTrainer):
         #outputs["rgb_sky"] = image_infos['pixels']  
         outputs["rgb_sky"] = sky_model(image_infos) 
      
-        outputs["rgb_sky_blend"] = outputs["rgb_sky"] * (1.0 - outputs["opacity"]) #dilated_mask.float()[...,None] #image_infos["sky_masks"].float()[...,None] ##
+        outputs["rgb_sky_blend"] = outputs["rgb_sky"] * (1.0 - outputs["opacity"])
+
+        rgb_blended = outputs["rgb_gaussians"] + outputs["rgb_sky_blend"]
         
         # affine transformation
         outputs["rgb"] = self.affine_transformation(
-            outputs["rgb_gaussians"] + outputs["rgb_sky_blend"], image_infos
+            rgb_blended, image_infos
         )
         
         if 'rendered_pbr' in outputs:
@@ -311,4 +313,3 @@ class MultiTrainer(BasicTrainer):
         metric_dict = super().compute_metrics(outputs, image_infos)
         
         return metric_dict
-

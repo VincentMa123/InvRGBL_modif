@@ -12,7 +12,11 @@ def GGX_specular(
 ):
     L = F.normalize(pts2l, dim=-1)  # [nrays, nlights, 3]
     V = F.normalize(pts2c, dim=-1)  # [nrays, 3]
-    H = F.normalize((L + V[:, None, :]) / 2.0, dim=-1)  # [nrays, nlights, 3]
+    half_vec = (L + V[:, None, :]) / 2.0
+    # Guard NaN when L and V are exactly opposite (zero half-vector)
+    zero_mask = half_vec.norm(dim=-1, keepdim=True) < 1e-6
+    half_vec = torch.where(zero_mask, torch.tensor([0.0, 0.0, 1.0], device=half_vec.device, dtype=half_vec.dtype), half_vec)
+    H = F.normalize(half_vec, dim=-1)  # [nrays, nlights, 3]
     N = F.normalize(normal, dim=-1)  # [nrays, 3]
 
     NoV = torch.sum(V * N, dim=-1, keepdim=True)  # [nrays, 1]
@@ -66,8 +70,10 @@ def rendering_equation_lidar(base_color, roughness, normals, viewdirs, view_dist
     denominator = 4 * np.pi * cos2_theta * (cos2_theta * (tau2 - 1) + 1) ** 2
     f_s = numerator / denominator.clamp(min=1e-6)
 
-    # Full LiDAR intensity: I = (fd + fs) * cos(theta) / d^2  (Pe = 1 as per paper)
-    pbr = ((f_d + f_s) * cos_theta).mean(dim=-2) / (view_dists ** 2)
+    # Full LiDAR intensity: I = (fd + fs) * cos(theta)
+    # NOTE: removed 1/d^2 term because GT Waymo intensity is already
+    # range-corrected by sensor hardware / LUT normalization.
+    pbr = ((f_d + f_s) * cos_theta).mean(dim=-2)
     return pbr
 
 
@@ -116,7 +122,13 @@ def rendering_equation(base_color, roughness, normals, viewdirs,
 
     specular = ((f_s) * transport).mean(dim=-2)
     pbr = ((f_d + f_s) * transport).mean(dim=-2)
-    diffuse_light = transport.mean(dim=-2)
+    # Add small ambient term so fully BVH-occluded Gaussians aren't pitch black
+    ambient = 0.02
+    pbr = pbr + ambient
+    diffuse_light = transport.mean(dim=-2) + ambient
+    # Defensive: NaN/Inf from GGX zero half-vector or BVH cache corruption
+    pbr = torch.nan_to_num(pbr, nan=ambient, posinf=1.0, neginf=0.0)
+    diffuse_light = torch.nan_to_num(diffuse_light, nan=ambient, posinf=1.0, neginf=0.0)
 
     if with_sun and (sun_visibility is not None):
         sun_visibility = sun_visibility.detach()
@@ -227,3 +239,112 @@ def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
     return tuple(copied_tensors)
 
+
+
+def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_map,
+                    viewdir_map, env_map, sun_dir, sun_intensity, spotlights=None,
+                    depth_map=None, means_map=None, min_roughness=0.08,
+                    reflectivity_map=None, reflectivity_f0_strength=0.35):
+    """
+    Image-space PBR shading with environment map and analytic sun.
+    
+    This is the core deferred shading function that replaces per-Gaussian
+    Monte-Carlo PBR with fast image-space IBL (image-based lighting).
+    
+    Args:
+        albedo_map: [H, W, 3] rasterized albedo
+        normal_map: [H, W, 3] rasterized normals (world space)
+        roughness_map: [H, W, 1] rasterized roughness
+        metallic_map: [H, W, 1] rasterized metallic
+        sunvis_map: [H, W, 1] rasterized sun visibility (from BVH)
+        viewdir_map: [H, W, 3] view directions per pixel (world space)
+        env_map: EnvironmentMap instance
+        sun_dir: [3] normalized sun direction
+        sun_intensity: [3] sun RGB intensity
+        spotlights: optional list of spotlights for inference
+        depth_map: optional [H, W, 1] for spotlight distance computation
+        means_map: optional [H, W, 3] world positions for spotlight computation
+    
+    Returns:
+        rgb: [H, W, 3] shaded image
+    """
+    import torch.nn.functional as F
+    
+    H, W = albedo_map.shape[:2]
+    device = albedo_map.device
+    
+    # Flatten for batch processing
+    N = H * W
+    albedo = albedo_map.reshape(N, 3).clamp(min=0)
+    normal = F.normalize(normal_map.reshape(N, 3), dim=-1)
+    roughness = roughness_map.reshape(N, 1).clamp(min_roughness, 1.0)
+    metallic = metallic_map.reshape(N, 1).clamp(0, 1)
+    sunvis = sunvis_map.reshape(N, 1)
+    viewdir = F.normalize(viewdir_map.reshape(N, 3), dim=-1)
+    
+    # ---- Environment lighting (IBL) ----
+    
+    # Diffuse: sample env map at normal direction
+    env_diffuse = env_map.sample_diffuse(normal)  # [N, 3]
+    
+    # Specular: sample env map at reflection direction with roughness-based blur
+    NoV = (normal * viewdir).sum(-1, keepdim=True).clamp(min=0)
+    reflection = 2 * NoV * normal - viewdir
+    reflection = F.normalize(reflection, dim=-1)
+    env_specular = env_map.sample_specular(reflection, roughness)  # [N, 3]
+    
+    # Metallic Fresnel: F0 = (1-metallic)*dielectric_F0 + albedo*metallic.
+    # LiDAR reflectivity is a near-infrared material cue, not visible RGB color.
+    # Use it only as a neutral scalar prior for dielectric specular strength.
+    dielectric_F0 = torch.full_like(metallic, 0.04)
+    if reflectivity_map is not None:
+        reflectivity = reflectivity_map.reshape(N, 1).clamp(0.0, 1.0)
+        reflectivity_f0 = 0.02 + 0.06 * reflectivity
+        strength = float(reflectivity_f0_strength)
+        dielectric_F0 = dielectric_F0 + strength * (reflectivity_f0 - dielectric_F0)
+    F0 = (1.0 - metallic) * dielectric_F0 + albedo * metallic
+    fresnel = F0 + (1.0 - F0) * (1.0 - NoV).pow(5)
+    
+    # Combine: diffuse gets albedo tint, specular gets fresnel
+    diffuse = albedo * env_diffuse * (1.0 - metallic)
+    specular = env_specular * fresnel
+    
+    # ---- Analytic sun (with BVH shadows) ----
+    
+    sun_dir = F.normalize(sun_dir, dim=-1)
+    NoL = (normal * sun_dir).sum(-1, keepdim=True).clamp(min=0)
+    sun_light = NoL * sun_intensity.to(device) * 3
+    sun_light = sun_light.clip(0, 10)
+    
+    # Sun diffuse
+    sun_diffuse = albedo / np.pi * sun_light * sunvis
+    
+    # Sun specular (simplified GGX in image space)
+    sun_dir_expanded = sun_dir[None, None, :].expand(N, 1, 3)
+    sun_specular_brdf = GGX_specular(
+        normal, viewdir, sun_dir_expanded, roughness, fresnel=fresnel[:, None, :]
+    ).squeeze(1)  # [N, 3]
+    # For metallic, tint specular by F0 (approximation)
+    sun_specular = sun_specular_brdf * sun_light * (F0 * 0.5 + 0.5) * sunvis * 0.3
+    
+    # ---- Spotlights (inference only) ----
+    spotlight_contrib = 0
+    if spotlights is not None and len(spotlights) > 0 and means_map is not None:
+        means_flat = means_map.reshape(N, 3)
+        spotlight_contrib = compute_spotlight_contribution(
+            spotlights, means_flat, normal, albedo, roughness, viewdir
+        )
+    
+    # ---- Combine all contributions ----
+    pbr = diffuse + specular + sun_diffuse + sun_specular + spotlight_contrib
+    
+    # Defensive: catch NaN/Inf early in image-space PBR before they corrupt means
+    if torch.isnan(pbr).any() or torch.isinf(pbr).any():
+        bad = torch.isnan(pbr) | torch.isinf(pbr)
+        raise ValueError(
+            f"NaN/Inf detected in image_space_pbr output at {bad.sum().item()} pixels. "
+            f"diffuse nan={torch.isnan(diffuse).any()}, specular nan={torch.isnan(specular).any()}, "
+            f"sun_diffuse nan={torch.isnan(sun_diffuse).any()}, sun_specular nan={torch.isnan(sun_specular).any()}"
+        )
+    
+    return pbr.reshape(H, W, 3)

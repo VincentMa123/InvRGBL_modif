@@ -6,3 +6,6 @@ __pycache__/
 /work_dirs/
 
 AGENTS.md
+report.txt
+preprocess_lidar_intensity_023.sbatch
+relight_023.sbatch

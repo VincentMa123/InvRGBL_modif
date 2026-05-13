@@ -5,6 +5,8 @@ from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 from tqdm import tqdm
+import cv2
+import torch
 
 
 LIDAR_BIN_COLUMNS = 14
@@ -12,7 +14,7 @@ POINT_SLICE = slice(3, 6)
 GROUND_LABEL_INDEX = 10
 INTENSITY_INDEX = 11
 LASER_ID_INDEX = 13
-NUM_BEAMS = 5
+NUM_BEAMS = 64
 CAM_IDS = [0, 1, 2, 3, 4]
 WAYMO_IMAGE_SIZES = {
     0: (1280, 1920),
@@ -25,6 +27,8 @@ OPENCV2DATASET = np.array(
     [[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1]],
     dtype=np.float32,
 )
+TOP_LIDAR_VERTICAL_ANGLE_MIN = -0.31
+TOP_LIDAR_VERTICAL_ANGLE_MAX = 0.04
 
 
 def parse_args():
@@ -137,6 +141,48 @@ def parse_args():
         help="Overwrite projected camera-space intensity maps if they already exist.",
     )
     parser.add_argument(
+        "--projection_window",
+        type=int,
+        default=0,
+        help="Number of temporally local LiDAR scans to project per frame; 0 keeps the old all-scans projection.",
+    )
+    parser.add_argument(
+        "--projection_dilation_kernel",
+        type=int,
+        default=1,
+        help="Dilation kernel for projected intensity values. Use 1 for sparse training targets; 5 approximates the old visualization-style target.",
+    )
+    parser.add_argument(
+        "--projection_normalize",
+        choices=["fixed", "frame_percentile", "none"],
+        default="fixed",
+        help="How to normalize projected intensity maps. 'fixed' uses a scene-stable clip/max scale; avoid 'frame_percentile' for training.",
+    )
+    parser.add_argument(
+        "--projection_clip_max",
+        type=float,
+        default=2.0,
+        help="Maximum projected intensity value before fixed normalization.",
+    )
+    parser.add_argument(
+        "--projection_percentile_low",
+        type=float,
+        default=2.0,
+        help="Lower percentile for --projection_normalize frame_percentile.",
+    )
+    parser.add_argument(
+        "--projection_percentile_high",
+        type=float,
+        default=98.0,
+        help="Upper percentile for --projection_normalize frame_percentile.",
+    )
+    parser.add_argument(
+        "--projection_gamma",
+        type=float,
+        default=1.0,
+        help="Gamma applied after projection normalization. Use 1.0 for training targets.",
+    )
+    parser.add_argument(
         "--limit_scans",
         type=int,
         default=0,
@@ -201,21 +247,38 @@ def load_lidar_info(scan_path: Path) -> np.ndarray:
 def select_points(lidar_info: np.ndarray, args) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(lidar_info[:, POINT_SLICE], dtype=np.float32)
     intensities = np.asarray(lidar_info[:, INTENSITY_INDEX], dtype=np.float32)
-    laser_ids = np.asarray(lidar_info[:, LASER_ID_INDEX], dtype=np.int32)
+    sensor_ids = np.asarray(lidar_info[:, LASER_ID_INDEX], dtype=np.int32)
 
-    valid_mask = np.isfinite(intensities)
-    valid_mask &= np.all(np.isfinite(points), axis=1)
+    valid_mask = np.isfinite(intensities) & np.all(np.isfinite(points), axis=1)
+    # Only calibrate the Top LiDAR (sensor_id 0) to remove rings
+    valid_mask &= (sensor_ids == 0)
+
+    ranges = np.linalg.norm(points, axis=1)
+    if args.min_range is not None:
+        valid_mask &= ranges >= args.min_range
+    if args.max_range is not None:
+        valid_mask &= ranges <= args.max_range
 
     if args.only_ground:
         valid_mask &= np.asarray(lidar_info[:, GROUND_LABEL_INDEX] > 0.5)
-    if args.top_lidar_only:
-        valid_mask &= laser_ids == 0
-    if args.min_range is not None:
-        valid_mask &= np.linalg.norm(points, axis=1) >= args.min_range
-    if args.max_range is not None:
-        valid_mask &= np.linalg.norm(points, axis=1) <= args.max_range
 
-    return points[valid_mask], intensities[valid_mask], laser_ids[valid_mask]
+    points = points[valid_mask]
+    intensities = intensities[valid_mask]
+    if points.shape[0] == 0:
+        return points, intensities, np.empty(0, dtype=np.int32)
+
+    return points, intensities, compute_top_lidar_beam_ids(points)
+
+
+def compute_top_lidar_beam_ids(points: np.ndarray) -> np.ndarray:
+    dist_xy = np.sqrt(points[:, 0] ** 2 + points[:, 1] ** 2)
+    angles = np.arctan2(points[:, 2], dist_xy)
+    beam_ids = (
+        (angles - TOP_LIDAR_VERTICAL_ANGLE_MIN)
+        / (TOP_LIDAR_VERTICAL_ANGLE_MAX - TOP_LIDAR_VERTICAL_ANGLE_MIN + 1e-6)
+        * (NUM_BEAMS - 1)
+    )
+    return np.clip(beam_ids, 0, NUM_BEAMS - 1).astype(np.int32)
 
 
 def sample_intensities(scan_files: List[Tuple[str, Path]], args) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
@@ -553,30 +616,53 @@ def save_lut(
     )
 
 
+def load_existing_lut(output_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    with np.load(output_path, allow_pickle=False) as data:
+        missing_keys = [key for key in ("lut", "edges") if key not in data]
+        if missing_keys:
+            raise KeyError(f"Existing LUT file {output_path} is missing keys: {missing_keys}")
+        lut = data["lut"].astype(np.float32)
+        edges = data["edges"].astype(np.float32)
+    return lut, edges
+
+
 def write_normalized_bins(scan_files: List[Tuple[str, Path]], lut: np.ndarray, edges: np.ndarray, dirname: str, overwrite: bool):
-    if dirname == "intensity":
-        raise ValueError(
-            "Refusing to write normalized scan bins into the 'intensity' directory. "
-            "That directory is reserved for projected camera intensity maps named like 000_0.npy. "
-            "Use a lidar-specific directory such as 'lidar_normalized'."
-        )
     progress = tqdm(scan_files, desc="Writing normalized bins", dynamic_ncols=True)
     for scene_name, scan_path in progress:
         scene_dir = scan_path.parent.parent
         output_dir = scene_dir / dirname
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / scan_path.name
-        if output_path.exists() and not overwrite:
-            progress.set_postfix(scene=scene_name)
-            continue
+        
+        if output_path.exists() and not overwrite: continue
+            
         lidar_info = np.array(load_lidar_info(scan_path), copy=True)
+        points = np.asarray(lidar_info[:, POINT_SLICE], dtype=np.float32)
         intensities = np.asarray(lidar_info[:, INTENSITY_INDEX], dtype=np.float32)
-        laser_ids = np.asarray(lidar_info[:, LASER_ID_INDEX], dtype=np.int32)
-        bins = digitize_intensity(intensities, edges, laser_ids)
-        normalized = lut[np.clip(laser_ids, 0, lut.shape[0] - 1), bins]
-        lidar_info[:, INTENSITY_INDEX] = normalized.astype(np.float32)
+        sensor_ids = np.asarray(lidar_info[:, LASER_ID_INDEX], dtype=np.int32)
+        
+        # Identify beams for Top LiDAR points only
+        top_mask = (sensor_ids == 0)
+        if not top_mask.any():
+            lidar_info[:, INTENSITY_INDEX] = 0
+            lidar_info.astype(np.float32).tofile(output_path)
+            continue
+
+        beam_ids = compute_top_lidar_beam_ids(points[top_mask])
+
+        # Apply LUT calibration
+        bins = digitize_intensity(intensities[top_mask], edges, beam_ids)
+        normalized = lut[beam_ids, bins]
+        
+        # Apply Distance Compensation (Reflectance calculation)
+        dist = np.linalg.norm(points[top_mask], axis=1)
+        reflectance = normalized * ((dist / 20.0) ** 2)
+        
+        # Update only Top LiDAR points (set others to 0 or keep as is)
+        lidar_info[~top_mask, INTENSITY_INDEX] = 0 
+        lidar_info[top_mask, INTENSITY_INDEX] = reflectance.astype(np.float32)
+        
         lidar_info.astype(np.float32).tofile(output_path)
-        progress.set_postfix(scene=scene_name)
 
 
 def load_relative_ego_poses(scene_dir: Path, num_frames: int) -> List[np.ndarray]:
@@ -617,15 +703,26 @@ def project_points(points_world: np.ndarray, cam_to_world: np.ndarray, intrinsic
     return np.concatenate([pixels, depth[:, None]], axis=1)
 
 
-def project_normalized_bins_to_intensity_maps(scene_dir: Path, lidar_dirname: str, output_dirname: str, overwrite: bool):
+def project_normalized_bins_to_intensity_maps(
+    scene_dir: Path,
+    lidar_dirname: str,
+    output_dirname: str,
+    overwrite: bool,
+    projection_window: int = 0,
+    projection_dilation_kernel: int = 1,
+    projection_normalize: str = "fixed",
+    projection_clip_max: float = 2.0,
+    projection_percentile_low: float = 2.0,
+    projection_percentile_high: float = 98.0,
+    projection_gamma: float = 1.0,
+):
+    if projection_clip_max <= 0:
+        raise ValueError("--projection_clip_max must be positive")
+    projection_dilation_kernel = max(int(projection_dilation_kernel), 1)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     lidar_dir = scene_dir / lidar_dirname
-    if not lidar_dir.exists():
-        raise FileNotFoundError(f"Missing normalized lidar directory: {lidar_dir}")
-
     scan_paths = sorted(lidar_dir.glob("*.bin"))
-    if not scan_paths:
-        raise ValueError(f"No normalized lidar scans found in {lidar_dir}")
-
     output_dir = scene_dir / output_dirname
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -633,47 +730,104 @@ def project_normalized_bins_to_intensity_maps(scene_dir: Path, lidar_dirname: st
     camera_intrinsics = load_camera_intrinsics(scene_dir)
     camera_extrinsics = load_camera_extrinsics(scene_dir)
 
-    progress = tqdm(
-        enumerate(scan_paths),
-        total=len(scan_paths),
-        desc=f"Projecting normalized intensity for {scene_dir.name}",
-        dynamic_ncols=True,
-    )
-    for frame_idx, scan_path in progress:
-        lidar_info = np.asarray(load_lidar_info(scan_path))
-        points_vehicle = np.asarray(lidar_info[:, POINT_SLICE], dtype=np.float32)
-        intensities = np.asarray(lidar_info[:, INTENSITY_INDEX], dtype=np.float32)
+    all_pts, all_ints = [], []
+    if projection_window > 0:
+        print(f"Loading local projection clouds on CPU; window={projection_window} scans")
+    else:
+        print(f"Moving Global Cloud to {device}...")
+    for i, path in enumerate(scan_paths):
+        lidar_info = np.asarray(load_lidar_info(path))
+        pts_veh = lidar_info[:, POINT_SLICE]
+        intensities = np.clip(lidar_info[:, INTENSITY_INDEX], 0, projection_clip_max)
+        
+        # Transform to World
+        pts_world = (ego_poses[i][:3, :3] @ pts_veh.T + ego_poses[i][:3, 3:4]).T
+        all_pts.append(torch.from_numpy(pts_world).float())
+        all_ints.append(torch.from_numpy(intensities).float())
 
-        valid_points = np.isfinite(points_vehicle).all(axis=1) & np.isfinite(intensities)
-        points_vehicle = points_vehicle[valid_points]
-        intensities = intensities[valid_points]
-
-        ego_to_world = ego_poses[frame_idx]
-        points_world = (ego_to_world[:3, :3] @ points_vehicle.T + ego_to_world[:3, 3:4]).T
-
+    if projection_window > 0:
+        global_pts = None
+        global_int = None
+    else:
+        # Massive tensors on GPU
+        global_pts = torch.cat(all_pts, dim=0).to(device) # [N, 3]
+        global_int = torch.cat(all_ints, dim=0).to(device) # [N]
+    
+    # Pre-calculate a mask for the global cloud to keep only points within a 100m cube 
+    # (Optional: speeds up math if you have millions of distant points)
+    
+    for frame_idx in tqdm(range(len(scan_paths)), desc="GPU Projecting"):
         for cam_id in CAM_IDS:
             output_path = output_dir / f"{frame_idx:03d}_{cam_id}.npy"
-            if output_path.exists() and not overwrite:
-                continue
+            if output_path.exists() and not overwrite: continue
 
-            cam_to_world = ego_to_world @ camera_extrinsics[cam_id]
-            projected = project_points(points_world, cam_to_world, camera_intrinsics[cam_id])
+            h, w = WAYMO_IMAGE_SIZES[cam_id]
+            cam_to_world = torch.from_numpy(ego_poses[frame_idx] @ camera_extrinsics[cam_id]).float().to(device)
+            world_to_cam = torch.inverse(cam_to_world)
+            K = torch.from_numpy(camera_intrinsics[cam_id]).float().to(device)
 
-            height, width = WAYMO_IMAGE_SIZES[cam_id]
-            intensity_map = np.zeros((height, width), dtype=np.float32)
+            if projection_window > 0:
+                half_window = projection_window // 2
+                start_idx = max(0, frame_idx - half_window)
+                end_idx = min(len(scan_paths), start_idx + projection_window)
+                start_idx = max(0, end_idx - projection_window)
+                local_pts = torch.cat(all_pts[start_idx:end_idx], dim=0).to(device)
+                local_int = torch.cat(all_ints[start_idx:end_idx], dim=0).to(device)
+            else:
+                local_pts = global_pts
+                local_int = global_int
 
-            u = projected[:, 0].astype(np.int32)
-            v = projected[:, 1].astype(np.int32)
-            depth = projected[:, 2]
-            valid = (
-                (depth > 0)
-                & (u >= 0)
-                & (u < width)
-                & (v >= 0)
-                & (v < height)
-            )
-            intensity_map[v[valid], u[valid]] = intensities[valid]
-            np.save(output_path, intensity_map[..., None])
+            # 1. GPU Projection (The Matrix Math)
+            # cam_pts = R * world_pts + T
+            cam_pts = (world_to_cam[:3, :3] @ local_pts.T + world_to_cam[:3, 3:4]).T
+            depth = cam_pts[:, 2]
+            
+            # Frustum Culling (Only points in front of camera)
+            front_mask = depth > 0.5
+            if not front_mask.any(): continue
+            
+            # Project to Pixels
+            pixel_pts = (K @ cam_pts[front_mask].T).T
+            u = (pixel_pts[:, 0] / pixel_pts[:, 2]).long()
+            v = (pixel_pts[:, 1] / pixel_pts[:, 2]).long()
+            
+            # 2. Vectorized Validity Check
+            img_mask = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+            if not img_mask.any(): continue
+            
+            u, v, d = u[img_mask], v[img_mask], depth[front_mask][img_mask]
+            intensities = local_int[front_mask][img_mask]
+
+            # 3. GPU Z-Buffer (Instant Sorting)
+            # Sort by depth descending so closest points are assigned last
+            sort_idx = torch.argsort(d, descending=True)
+            u_final, v_vinal, i_final = u[sort_idx], v[sort_idx], intensities[sort_idx]
+
+            # 4. Create Image
+            intensity_map = torch.zeros((h, w), device=device)
+            intensity_map[v_vinal, u_final] = i_final
+            
+            # Back to NumPy for OpenCV and Saving
+            img_np = intensity_map.cpu().numpy()
+
+            if projection_dilation_kernel > 1:
+                kernel = np.ones((projection_dilation_kernel, projection_dilation_kernel), np.uint8)
+                img_np = cv2.dilate(img_np, kernel)
+
+            if projection_normalize == "fixed":
+                img_np = np.clip(img_np, 0.0, projection_clip_max) / max(projection_clip_max, 1e-6)
+            elif projection_normalize == "frame_percentile" and img_np.max() > 0:
+                valid = img_np[img_np > 0]
+                v_min = np.percentile(valid, projection_percentile_low)
+                v_max = np.percentile(valid, projection_percentile_high)
+                img_np = np.clip((img_np - v_min) / (v_max - v_min + 1e-6), 0, 1)
+            elif projection_normalize == "none":
+                img_np = np.maximum(img_np, 0.0)
+
+            if projection_gamma != 1.0 and img_np.max() > 0:
+                img_np = np.power(np.clip(img_np, 0.0, None), projection_gamma)
+
+            np.save(output_path, img_np[..., None].astype(np.float32))
 
 
 def format_edge_summary(edges: np.ndarray) -> str:
@@ -688,19 +842,24 @@ def format_edge_summary(edges: np.ndarray) -> str:
 
 def build_for_scan_files(scan_files: List[Tuple[str, Path]], args, output_path: Path, scope_label: str):
     print(f"Found {len(scan_files)} lidar scans for {scope_label}")
-    samples, beam_samples = sample_intensities(scan_files, args)
-    edges, centers = build_edges(samples, beam_samples, args)
-    print(format_edge_summary(edges))
+    if output_path.exists():
+        print(f"Reusing existing LUT at {output_path}; skipping sampling and accumulation")
+        lut, edges = load_existing_lut(output_path)
+        print(format_edge_summary(edges))
+    else:
+        samples, beam_samples = sample_intensities(scan_files, args)
+        edges, centers = build_edges(samples, beam_samples, args)
+        print(format_edge_summary(edges))
 
-    lut_sums, lut_counts, global_bin_sums, global_bin_counts, stats = accumulate_lut(scan_files, edges, args)
-    lut = finalize_lut(lut_sums, lut_counts, global_bin_sums, global_bin_counts, centers)
-    beam_bias_factors = compute_beam_bias_factors(scan_files, lut, edges, args)
-    if args.beam_bias_correction != "none":
-        lut = apply_beam_bias_factors(lut, beam_bias_factors)
-        print(f"Applied beam bias factors: {beam_bias_factors.tolist()}")
-    save_lut(output_path, lut, edges, centers, lut_counts, stats, args, beam_bias_factors)
-    print(f"Saved LUT to {output_path}")
-    print(json.dumps(stats, indent=2))
+        lut_sums, lut_counts, global_bin_sums, global_bin_counts, stats = accumulate_lut(scan_files, edges, args)
+        lut = finalize_lut(lut_sums, lut_counts, global_bin_sums, global_bin_counts, centers)
+        beam_bias_factors = compute_beam_bias_factors(scan_files, lut, edges, args)
+        if args.beam_bias_correction != "none":
+            lut = apply_beam_bias_factors(lut, beam_bias_factors)
+            print(f"Applied beam bias factors: {beam_bias_factors.tolist()}")
+        save_lut(output_path, lut, edges, centers, lut_counts, stats, args, beam_bias_factors)
+        print(f"Saved LUT to {output_path}")
+        print(json.dumps(stats, indent=2))
 
     if args.normalized_dirname:
         write_normalized_bins(
@@ -718,6 +877,13 @@ def build_for_scan_files(scan_files: List[Tuple[str, Path]], args, output_path: 
                     lidar_dirname=args.normalized_dirname,
                     output_dirname=args.projected_dirname,
                     overwrite=args.overwrite_projected,
+                    projection_window=args.projection_window,
+                    projection_dilation_kernel=args.projection_dilation_kernel,
+                    projection_normalize=args.projection_normalize,
+                    projection_clip_max=args.projection_clip_max,
+                    projection_percentile_low=args.projection_percentile_low,
+                    projection_percentile_high=args.projection_percentile_high,
+                    projection_gamma=args.projection_gamma,
                 )
     elif args.project_to_intensity:
         raise ValueError("--project_to_intensity requires --normalized_dirname so the script knows which normalized lidar scans to project.")

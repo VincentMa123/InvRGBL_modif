@@ -10,6 +10,12 @@ from torch import Tensor
 from torch.nn import functional as F
 from skimage.metrics import structural_similarity as ssim
 
+try:
+    import matplotlib.cm as cm
+    HAS_MPL = True
+except ImportError:
+    HAS_MPL = False
+
 from datasets.base import SplitWrapper
 from models.trainers.base import BasicTrainer
 from utils.visualization import (
@@ -21,6 +27,43 @@ logger = logging.getLogger()
 
 def get_numpy(x: Tensor) -> np.ndarray:
     return x.squeeze().cpu().numpy()
+
+
+def apply_colormap(frame: np.ndarray, cmap_name: str = "viridis") -> np.ndarray:
+    """Apply a matplotlib colormap to a grayscale or scalar frame.
+
+    Args:
+        frame: (H, W) or (H, W, 1) or (H, W, 3) numpy array in [0, 1].
+        cmap_name: Matplotlib colormap name (e.g., "viridis", "plasma", "jet", "turbo").
+
+    Returns:
+        (H, W, 3) RGB uint8 image.
+    """
+    if not HAS_MPL:
+        # Fallback: replicate grayscale to RGB
+        if frame.ndim == 3 and frame.shape[-1] == 3:
+            return to8b(frame)
+        gray = frame.squeeze()
+        return to8b(np.stack([gray, gray, gray], axis=-1))
+
+    # Extract scalar value
+    if frame.ndim == 3 and frame.shape[-1] == 3:
+        # Already RGB — assume grayscale replicated; take first channel
+        scalar = frame[..., 0]
+    else:
+        scalar = frame.squeeze()
+
+    cmap = cm.get_cmap(cmap_name)
+    colored = cmap(np.clip(scalar, 0.0, 1.0))[..., :3]  # drop alpha
+    return to8b(colored)
+
+def apply_black_mask(frame: np.ndarray, mask: Optional[Tensor]) -> np.ndarray:
+    if mask is None:
+        return frame
+    mask_np = mask.squeeze().detach().cpu().numpy().astype(bool)
+    out = frame.copy()
+    out[mask_np] = 0
+    return out
 
 def non_zero_mean(x: Tensor) -> float:
     return sum(x) / len(x) if len(x) > 0 else -1
@@ -59,6 +102,14 @@ def render_images(
         vis_indices (Optional[List[int]], optional): Indices to visualize. Defaults to None.
     """
     trainer.set_eval()
+    # Rebuild visibility caches for all frames to avoid temporal flickering
+    # from stale per-frame BVH data computed at different training steps.
+    if hasattr(trainer, 'rebuild_all_visibility') and hasattr(dataset, 'num_img_timesteps'):
+        # Pass actual sun direction so rendering_equation() gets correct sun visibility
+        sun_dir = None
+        if 'Sky' in trainer.models:
+            sun_dir = trainer.models['Sky'].get_sun_direction()
+        trainer.rebuild_all_visibility(dataset.num_img_timesteps, sun_direction=sun_dir)
     render_results = render(
         dataset,
         trainer=trainer,
@@ -119,6 +170,7 @@ def render(
     rendered_normals = []
     pbrs = []
     rendered_roughness =[]
+    rendered_metallic = []
     rendered_reflectivity= []
     rendered_intensity = []
     rendered_sun_visibility = []
@@ -152,6 +204,24 @@ def render(
                     cam_infos[k] = v.cuda(non_blocking=True)
             # render the image
             results = trainer(image_infos, cam_infos)
+            # --- debug: log maps at freeze step ---
+            try:
+                step_val = getattr(trainer, 'step', None)
+            except Exception:
+                step_val = None
+            if step_val == 15000:
+                def stats(x):
+                    if not isinstance(x, Tensor):
+                        return None
+                    t = x.detach()
+                    return dict(min=float(t.min()), max=float(t.max()), mean=float(t.mean()), zeros=int((t==0).sum()), nans=int(torch.isnan(t).sum()))
+
+                keys_to_check = ["rendered_intensity", "rendered_sun_visibility", "rendered_normal", "rendered_roughness", "rendered_reflectivity"]
+                debug_stats = {}
+                for k in keys_to_check:
+                    if k in results:
+                        debug_stats[k] = stats(results[k])
+                logger.info(f"[DEBUG][step={step_val}] rendered maps stats: {debug_stats}")
             
             # ------------- clip rgb ------------- #
             for k, v in results.items():
@@ -182,6 +252,9 @@ def render(
                 Background_rgb = results["Background_rgb"] * results[
                     "Background_opacity"
                 ] + green_background * (1 - results["Background_opacity"])
+                if "sky_masks" in image_infos:
+                    sky_mask_vis = image_infos["sky_masks"].unsqueeze(-1)
+                    Background_rgb = Background_rgb * (1 - sky_mask_vis) + green_background * sky_mask_vis
                 Background_rgbs.append(get_numpy(Background_rgb))
             if "RigidNodes_rgb" in results:
                 RigidNodes_rgb = results["RigidNodes_rgb"] * results[
@@ -219,26 +292,42 @@ def render(
             depth = results["depth"]
             depths.append(get_numpy(depth))
             #--------------normal----------------#
+            # For material visualizations, mask sky regions so unconstrained sky Gaussians
+            # don't show as black artifacts.
+            sky_mask_vis = None
+            if "sky_masks" in image_infos:
+                sky_mask_vis = image_infos["sky_masks"].unsqueeze(-1)  # [H, W, 1]
+
             if "normal" in results:
                 normal = results["normal"]
-                normals.append((get_numpy(normal)+1)/2)     
+                normal_vis = (get_numpy(normal) + 1) / 2
+                normals.append(apply_black_mask(normal_vis, sky_mask_vis))
             if "rendered_albedos" in results:
                 albedo = results["rendered_albedos"]
-                albedos.append(get_numpy(albedo))        
+                if sky_mask_vis is not None:
+                    albedo = albedo * (1 - sky_mask_vis)
+                albedos.append(get_numpy(albedo))
             if "rendered_roughness" in results:
                 roughness = results["rendered_roughness"]
-                rendered_roughness.append(get_numpy(roughness.repeat(1,1,3)))  
+                roughness_vis = apply_colormap(get_numpy(roughness), cmap_name="viridis")
+                rendered_roughness.append(apply_black_mask(roughness_vis, sky_mask_vis))
+            if "rendered_metallic" in results:
+                metallic = results["rendered_metallic"]
+                metallic_vis = apply_colormap(get_numpy(metallic), cmap_name="plasma")
+                rendered_metallic.append(apply_black_mask(metallic_vis, sky_mask_vis))
             if "rendered_reflectivity" in results:
                 reflectivity = results["rendered_reflectivity"]
-                rendered_reflectivity.append(get_numpy(reflectivity.repeat(1,1,3))) 
+                reflectivity_vis = apply_colormap(get_numpy(reflectivity), cmap_name="viridis")
+                rendered_reflectivity.append(apply_black_mask(reflectivity_vis, sky_mask_vis))
 
             if "rendered_intensity" in results:
                 intensity = results["rendered_intensity"]
-                rendered_intensity.append(get_numpy(intensity.repeat(1,1,3)))
+                intensity_vis = apply_colormap(get_numpy(intensity), cmap_name="turbo")
+                rendered_intensity.append(apply_black_mask(intensity_vis, sky_mask_vis))
 
             if "rendered_sun_visibility" in results:
                 sun_visibility = results["rendered_sun_visibility"]
-                rendered_sun_visibility.append(get_numpy(sun_visibility.repeat(1,1,3))) 
+                rendered_sun_visibility.append(apply_colormap(get_numpy(sun_visibility), cmap_name="gray")) 
 
             if "rendered_pbr" in results:
                 pbr = results["rendered_pbr"]
@@ -246,7 +335,10 @@ def render(
             
             if "intensity_images" in image_infos:
                 gt_intensity = image_infos["intensity_images"]
-                gt_intensitys.append(get_numpy(gt_intensity.repeat(1,1,3)))
+                gt_intensity_np = get_numpy(gt_intensity)
+                gt_intensity_vis = apply_colormap(gt_intensity_np, cmap_name="turbo")
+                gt_intensity_vis[np.squeeze(gt_intensity_np) <= 0] = 0
+                gt_intensitys.append(apply_black_mask(gt_intensity_vis, sky_mask_vis))
 
             if "diffuse_light" in results:
                 diffuse_light = results["diffuse_light"]
@@ -259,7 +351,8 @@ def render(
                 n[...,0] = - rendered_normal[...,1]
                 n[...,1] = - rendered_normal[...,2]
                 n[...,2] =  rendered_normal[...,0]
-                rendered_normals.append((get_numpy(n)+1)/2)    
+                rendered_normal_vis = (get_numpy(n) + 1) / 2
+                rendered_normals.append(apply_black_mask(rendered_normal_vis, sky_mask_vis))
 
             # ------------- mask ------------- #
             if "opacity" in results:
@@ -418,6 +511,8 @@ def render(
         results_dict["rendered_albedos"] = albedos
     if len(rendered_roughness) > 0:
         results_dict["rendered_roughness"] = rendered_roughness
+    if len(rendered_metallic) > 0:
+        results_dict["rendered_metallic"] = rendered_metallic
     if len(rendered_reflectivity) > 0:
         results_dict["rendered_reflectivity"] = rendered_reflectivity
     if len(rendered_intensity) > 0:

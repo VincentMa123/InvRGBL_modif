@@ -19,6 +19,9 @@ import torch
 def to8b(x):
     if isinstance(x, torch.Tensor):
         x = x.detach().cpu().numpy()
+    # Idempotent: if already uint8, return as-is
+    if isinstance(x, np.ndarray) and x.dtype == np.uint8:
+        return x
     return (255 * np.clip(x, 0, 1)).astype(np.uint8)
 
 def get_layout(dataset_type: str):
@@ -57,7 +60,7 @@ def layout_nuplan(
     # Create a canvas that's 3 times the height and 3 times the width of a single image
     tiled_height = height * 3
     tiled_width = width * 3
-    tiled_img = np.zeros((tiled_height, tiled_width, channel), dtype=np.float32)
+    tiled_img = np.zeros((tiled_height, tiled_width, channel), dtype=imgs[0].dtype)
     filled_mask = np.zeros((tiled_height, tiled_width), dtype=np.uint8)
     
     for idx, cam_name in enumerate(cam_names):
@@ -113,7 +116,7 @@ def layout_waymo(
     
     height = landscape_height
     width = landscape_width * 5
-    tiled_img = np.zeros((height, width, channel), dtype=np.float32)
+    tiled_img = np.zeros((height, width, channel), dtype=imgs[0].dtype)
     filled_mask = np.zeros((height, width), dtype=np.uint8)
     
     for idx, cam_name in enumerate(cam_names):
@@ -160,7 +163,7 @@ def layout_nuscenes(
 
     height = landscape_height * 2
     width = landscape_width * 3
-    tiled_img = np.zeros((height, width, channel), dtype=np.float32)
+    tiled_img = np.zeros((height, width, channel), dtype=imgs[0].dtype)
     filled_mask = np.zeros((height, width), dtype=np.uint8)
     
     for idx, cam_name in enumerate(cam_names):
@@ -210,7 +213,7 @@ def layout_pandaset(
 
     height = landscape_height + landscape_height
     width = landscape_width + landscape_width + landscape_width
-    tiled_img = np.zeros((height, width, channel), dtype=np.float32)
+    tiled_img = np.zeros((height, width, channel), dtype=imgs[0].dtype)
     filled_mask = np.zeros((height, width), dtype=np.uint8)
     
     for idx, cam_name in enumerate(cam_names):
@@ -254,7 +257,7 @@ def layout_kitti(
     height = imgs[0].shape[0]
     width = imgs[0].shape[1] * 2
     
-    tiled_img = np.zeros((height, width, channel), dtype=np.float32)
+    tiled_img = np.zeros((height, width, channel), dtype=imgs[0].dtype)
     filled_mask = np.zeros((height, width), dtype=np.uint8)
     
     for idx, cam_name in enumerate(cam_names):
@@ -295,7 +298,7 @@ def layout_argoverse(
 
     height = landscape_height + landscape_height + landscape_height
     width = landscape_width + landscape_height + landscape_width
-    tiled_img = np.zeros((height, width, channel), dtype=np.float32)
+    tiled_img = np.zeros((height, width, channel), dtype=imgs[0].dtype)
     filled_mask = np.zeros((height, width), dtype=np.uint8)
     
     for idx, cam_name in enumerate(cam_names):

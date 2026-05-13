@@ -231,9 +231,6 @@ class SkyDomeMLP(nn.Module):
         return  x #+ 0.1 # Output in [0, 1] range for RGB
 
 
-
-
-
 class EnvLight(torch.nn.Module):
     def __init__(
         self,
