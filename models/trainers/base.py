@@ -21,7 +21,13 @@ from pytorch_msssim import SSIM
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from .pbr import rendering_equation, rendering_equation_lidar, compute_spotlight_contribution, image_space_pbr
+from .pbr import (
+    rendering_equation,
+    rendering_equation_lidar,
+    compute_spotlight_contribution,
+    compute_screen_space_ao,
+    image_space_pbr,
+)
 from models.gaussians.basics import *
 from utils.graphics_utils import sample_incident_rays
 from datasets.base.pixel_source import get_rays
@@ -432,6 +438,7 @@ class BasicTrainer(nn.Module):
             "_features_dc",
             "_features_rest",
             "_normals",
+            "_base_color",
             "_roughness",
             "_metallic",
             "_sun_visibility",
@@ -447,7 +454,7 @@ class BasicTrainer(nn.Module):
                 if param is not None:
                     param.requires_grad_(False)
                     frozen_report.append(f"{class_name}.{attr_name}")
-            for attr_name in ("_base_color", "_reflectivity"):
+            for attr_name in ("_reflectivity",):
                 param = getattr(model, attr_name, None)
                 if param is not None and param.requires_grad:
                     trainable_report.append(f"{class_name}.{attr_name}")
@@ -475,6 +482,7 @@ class BasicTrainer(nn.Module):
             "scaling",
             "rotation",
             "normal",
+            "base_color",
             "roughness",
             "metallic",
             "sun_visibility",
@@ -565,7 +573,7 @@ class BasicTrainer(nn.Module):
         # lighting with the consistency losses.
         if step >= self.freeze_step:
             if not self.freezed:
-                print('Stage 2: freezing geometry, opacity, normals/roughness/metallic; training albedo, reflectivity, and lighting')
+                print('Stage 2: freezing geometry, opacity, albedo, normals/roughness/metallic; training reflectivity and lighting')
                 self.final_cull_before_freeze()
                 self.freeze_stage2_fixed_gaussian_params()
                 self.initialize_optimizer()
@@ -859,15 +867,41 @@ class BasicTrainer(nn.Module):
                     train_min_roughness = getattr(self, 'relight_min_roughness', 0.15)
                     if self.training:
                         train_min_roughness = min(train_min_roughness, 0.15)
-                    
-                    pbr_rgb = image_space_pbr(
-                        albedo_map=rendered_albedos,
-                        normal_map=rendered_normal,
-                        roughness_map=rendered_roughness,
-                        metallic_map=torch.zeros_like(rendered_metallic)
+
+                    envmap_ao_cfg = self.render_cfg.get("envmap_ao", {})
+                    if envmap_ao_cfg is None:
+                        envmap_ao_cfg = {}
+                    ao_map = None
+                    specular_ao_strength = float(envmap_ao_cfg.get("specular_strength", 0.2))
+                    if envmap_ao_cfg.get("enabled", True):
+                        ao_map = compute_screen_space_ao(
+                            depth_map=rendered_depth.detach(),
+                            normal_map=rendered_normal.detach(),
+                            opacity_map=alphas[..., None].detach(),
+                            radius=int(envmap_ao_cfg.get("radius", 5)),
+                            strength=float(envmap_ao_cfg.get("strength", 0.35)),
+                            depth_bias=float(envmap_ao_cfg.get("depth_bias", 0.02)),
+                        )
+
+                    pbr_albedo = rendered_albedos.detach() if self.training else rendered_albedos
+                    pbr_normal = rendered_normal.detach() if self.training else rendered_normal
+                    pbr_roughness = rendered_roughness.detach() if self.training else rendered_roughness
+                    pbr_metallic = (
+                        torch.zeros_like(rendered_metallic)
                         if (not self.training and getattr(self, "relight_force_dielectric", False))
-                        else rendered_metallic,
-                        sunvis_map=rendered_sun_visibility,
+                        else rendered_metallic
+                    )
+                    if self.training:
+                        pbr_metallic = pbr_metallic.detach()
+                    pbr_sun_visibility = rendered_sun_visibility.detach() if self.training else rendered_sun_visibility
+                    pbr_reflectivity = rendered_reflectivity.detach() if self.training else rendered_reflectivity
+
+                    pbr_rgb = image_space_pbr(
+                        albedo_map=pbr_albedo,
+                        normal_map=pbr_normal,
+                        roughness_map=pbr_roughness,
+                        metallic_map=pbr_metallic,
+                        sunvis_map=pbr_sun_visibility,
                         viewdir_map=viewdirs_img,
                         env_map=env_map,
                         sun_dir=sun_dir,
@@ -876,10 +910,14 @@ class BasicTrainer(nn.Module):
                         depth_map=rendered_depth,
                         means_map=means_map,
                         min_roughness=train_min_roughness,
-                        reflectivity_map=rendered_reflectivity,
+                        reflectivity_map=pbr_reflectivity,
+                        ao_map=ao_map,
+                        specular_ao_strength=specular_ao_strength,
                     )
 
-                    rendered_rgb = pbr_rgb
+                    rendered_pbr = pbr_rgb
+                    if not self.training:
+                        rendered_rgb = pbr_rgb
                 
                 info.update({'rendered_normal':rendered_normal,
                             'rendered_albedos':rendered_albedos,
@@ -1078,9 +1116,17 @@ class BasicTrainer(nn.Module):
 
         stage2_active = self.step > self.freeze_step
 
+        if "rendered_pbr" in outputs:
+            pbr_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
+            rendered_pbr = outputs["rendered_pbr"] * pbr_mask
+            gt_pbr_rgb = image_infos["pixels"] * pbr_mask
+            Ll1_pbr = torch.abs(rendered_pbr - gt_pbr_rgb).mean()
+            pbr_loss_name = "pbr" if stage2_active else "pbr_pre"
+            loss_dict["pbr_loss"] = self.get_loss_weight(pbr_loss_name) * Ll1_pbr
+
         # Material priors are active in Stage 1. After freeze, roughness,
-        # normals, metallic, and sun visibility are fixed; RGB/LiDAR albedo and
-        # lighting continue to train through RGB and consistency losses.
+        # albedo, normals, metallic, and sun visibility are fixed; RGB/LiDAR
+        # reflectivity and lighting continue to train through consistency losses.
         if not stage2_active and "roughness_images" in image_infos:
             roughness_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
             rendered_roughness = outputs["rendered_roughness"] * roughness_images_mask
@@ -1167,11 +1213,6 @@ class BasicTrainer(nn.Module):
         # ------------------------------
         use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
         if stage2_active:
-            if not use_ispbr_train and "rendered_pbr" in outputs:
-                rendered_pbr = outputs["rendered_pbr"] * valid_loss_mask[..., None]
-                Ll1_pbr = torch.abs(rendered_pbr - gt_rgb).mean()
-                loss_dict["pbr_loss"] = self.get_loss_weight("pbr") * Ll1_pbr
-
             if not use_ispbr_train and "diffuse_light" in outputs:
                 diffuse_light = outputs["diffuse_light"]
                 mean_light = diffuse_light.mean(-1, keepdim=True).expand_as(diffuse_light)

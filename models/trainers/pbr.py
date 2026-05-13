@@ -241,10 +241,61 @@ def cpu_deep_copy_tuple(input_tuple):
 
 
 
+def compute_screen_space_ao(
+    depth_map,
+    normal_map=None,
+    opacity_map=None,
+    radius=5,
+    strength=0.35,
+    depth_bias=0.02,
+):
+    """Approximate ambient occlusion from local depth discontinuities."""
+    if radius <= 0 or strength <= 0:
+        return torch.ones_like(depth_map[..., :1])
+
+    depth = depth_map[..., :1].permute(2, 0, 1).unsqueeze(0)
+    finite = torch.isfinite(depth)
+    valid = finite & (depth > 0)
+    if opacity_map is not None:
+        opacity = opacity_map[..., :1].permute(2, 0, 1).unsqueeze(0)
+        valid = valid & (opacity > 1e-3)
+
+    large_depth = torch.full_like(depth, 1e8)
+    masked_depth = torch.where(valid, depth, large_depth)
+    kernel_size = int(radius) * 2 + 1
+    neg_masked_depth = F.pad(-masked_depth, (int(radius), int(radius), int(radius), int(radius)), mode="replicate")
+    local_min_depth = -F.max_pool2d(
+        neg_masked_depth,
+        kernel_size=kernel_size,
+        stride=1,
+        padding=0,
+    )
+    depth_delta = (depth - local_min_depth - float(depth_bias)).clamp(min=0.0)
+    ao_raw = (depth_delta / depth.clamp(min=1e-3)).clamp(0.0, 1.0)
+
+    if normal_map is not None:
+        normal = F.normalize(normal_map.permute(2, 0, 1).unsqueeze(0), dim=1)
+        padded_normal = F.pad(normal, (int(radius), int(radius), int(radius), int(radius)), mode="replicate")
+        local_normal = F.avg_pool2d(
+            padded_normal,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=0,
+        )
+        local_normal = F.normalize(local_normal, dim=1)
+        normal_variation = (1.0 - (normal * local_normal).sum(dim=1, keepdim=True)).clamp(0.0, 1.0)
+        ao_raw = ao_raw * (0.5 + 0.5 * normal_variation)
+
+    ao = (1.0 - float(strength) * ao_raw).clamp(0.0, 1.0)
+    ao = torch.where(valid, ao, torch.ones_like(ao))
+    return ao.squeeze(0).permute(1, 2, 0)
+
+
 def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_map,
                     viewdir_map, env_map, sun_dir, sun_intensity, spotlights=None,
                     depth_map=None, means_map=None, min_roughness=0.08,
-                    reflectivity_map=None, reflectivity_f0_strength=0.35):
+                    reflectivity_map=None, reflectivity_f0_strength=0.35,
+                    ao_map=None, specular_ao_strength=0.2):
     """
     Image-space PBR shading with environment map and analytic sun.
     
@@ -264,6 +315,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
         spotlights: optional list of spotlights for inference
         depth_map: optional [H, W, 1] for spotlight distance computation
         means_map: optional [H, W, 3] world positions for spotlight computation
+        ao_map: optional [H, W, 1] EnvMap visibility multiplier
     
     Returns:
         rgb: [H, W, 3] shaded image
@@ -292,6 +344,11 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
     reflection = 2 * NoV * normal - viewdir
     reflection = F.normalize(reflection, dim=-1)
     env_specular = env_map.sample_specular(reflection, roughness)  # [N, 3]
+    if ao_map is not None:
+        ao = ao_map.reshape(N, 1).clamp(0.0, 1.0)
+        env_diffuse = env_diffuse * ao
+        specular_ao = 1.0 - float(specular_ao_strength) * (1.0 - ao)
+        env_specular = env_specular * specular_ao.clamp(0.0, 1.0)
     
     # Metallic Fresnel: F0 = (1-metallic)*dielectric_F0 + albedo*metallic.
     # LiDAR reflectivity is a near-infrared material cue, not visible RGB color.

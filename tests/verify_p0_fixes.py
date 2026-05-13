@@ -53,8 +53,11 @@ def check_base_py():
     intensity_in_stage2 = "intensity_loss" in after_stage2
     print(f"  [{'PASS' if intensity_in_stage2 else 'FAIL'}] intensity_loss is in Stage 2 block")
     
-    no_pbr_pre = "pbr_pre" not in base_code
-    print(f"  [{'PASS' if no_pbr_pre else 'FAIL'}] pbr_pre removed from codebase")
+    has_pbr_pre = 'pbr_loss_name = "pbr" if stage2_active else "pbr_pre"' in base_code
+    print(f"  [{'PASS' if has_pbr_pre else 'FAIL'}] image-space PBR has pre/post-freeze loss weights")
+
+    no_ispbr_skip = 'if not use_ispbr_train and "rendered_pbr" in outputs' not in base_code
+    print(f"  [{'PASS' if no_ispbr_skip else 'FAIL'}] pbr_loss is not skipped during image-space PBR training")
     
     no_intensity_stage1 = True
     before_stage2 = base_code[:stage2_idx]
@@ -62,7 +65,7 @@ def check_base_py():
         no_intensity_stage1 = False
     print(f"  [{'PASS' if no_intensity_stage1 else 'FAIL'}] intensity_loss NOT in Stage 1")
     
-    return no_sigmoid and intensity_in_stage2 and no_pbr_pre and no_intensity_stage1
+    return no_sigmoid and intensity_in_stage2 and has_pbr_pre and no_ispbr_skip and no_intensity_stage1
 
 
 def check_configs():
@@ -80,9 +83,9 @@ def check_configs():
         
         losses = trainer.get("losses", {})
         checks = {
-            "intensity": 1.0,
-            "ref_neighborhood_smoothness": 0.05,
-            "ref_region_consistency_albedo": 0.05,
+            "pbr_pre": 0.1,
+            "pbr": 0.5,
+            "albedo_pre": 0.1,
         }
         for key, expected in checks.items():
             val = losses.get(key)
@@ -91,6 +94,17 @@ def check_configs():
             print(f"  [{'PASS' if ok else 'FAIL'}] {cfg_path.name}: {key} = {actual} (expected {expected})")
             if not ok:
                 all_pass = False
+        envmap_ao = trainer.get("render", {}).get("envmap_ao", {})
+        ao_ok = (
+            envmap_ao.get("enabled") is True
+            and envmap_ao.get("radius") == 5
+            and envmap_ao.get("strength") == 0.35
+            and envmap_ao.get("specular_strength") == 0.2
+            and envmap_ao.get("depth_bias") == 0.02
+        )
+        print(f"  [{'PASS' if ao_ok else 'FAIL'}] {cfg_path.name}: EnvMap AO defaults configured")
+        if not ao_ok:
+            all_pass = False
     return all_pass
 
 
@@ -157,6 +171,42 @@ def check_relightgs_py():
     return has_init_intensity and has_roughness_map and no_todo
 
 
+def check_albedo_leak_controls():
+    """Verify image-space PBR cannot drive albedo through RGB reconstruction."""
+    base_code = (PROJECT_ROOT / "models/trainers/base.py").read_text()
+    pbr_code = (PROJECT_ROOT / "models/trainers/pbr.py").read_text()
+
+    assigns_pbr = "rendered_pbr = pbr_rgb" in base_code
+    print(f"  [{'PASS' if assigns_pbr else 'FAIL'}] image-space PBR is stored in rendered_pbr")
+
+    eval_only_rgb = "if not self.training:\n                        rendered_rgb = pbr_rgb" in base_code
+    print(f"  [{'PASS' if eval_only_rgb else 'FAIL'}] rendered_rgb is replaced by PBR only outside training")
+
+    detaches_materials = (
+        "pbr_albedo = rendered_albedos.detach() if self.training else rendered_albedos" in base_code
+        and "pbr_normal = rendered_normal.detach() if self.training else rendered_normal" in base_code
+        and "pbr_reflectivity = rendered_reflectivity.detach() if self.training else rendered_reflectivity" in base_code
+    )
+    print(f"  [{'PASS' if detaches_materials else 'FAIL'}] PBR loss detaches material maps during training")
+
+    base_color_frozen = (
+        '"_base_color",' in base_code
+        and '"base_color",' in base_code
+        and 'for attr_name in ("_reflectivity",):' in base_code
+    )
+    print(f"  [{'PASS' if base_color_frozen else 'FAIL'}] _base_color is frozen in Stage 2")
+
+    ao_controls = (
+        "def compute_screen_space_ao" in pbr_code
+        and "env_diffuse = env_diffuse * ao" in pbr_code
+        and "env_specular = env_specular * specular_ao.clamp" in pbr_code
+        and "ao_map=ao_map" in base_code
+    )
+    print(f"  [{'PASS' if ao_controls else 'FAIL'}] EnvMap diffuse/specular receive screen-space AO")
+
+    return assigns_pbr and eval_only_rgb and detaches_materials and base_color_frozen and ao_controls
+
+
 def main():
     print("=" * 60)
     print("Verifying P0 paper-code alignment fixes")
@@ -181,6 +231,9 @@ def main():
     
     print("\n6. models/gaussians/relightgs.py (P2: roughness from LiDAR intensity init):")
     results.append(check_relightgs_py())
+
+    print("\n7. image-space PBR albedo leak controls:")
+    results.append(check_albedo_leak_controls())
     
     print("\n" + "=" * 60)
     if all(results):
