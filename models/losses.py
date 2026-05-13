@@ -25,7 +25,7 @@ from skimage.util import img_as_float
 
 def segment_a_with_slic(a, n_segments=100):
     """ Use SLIC to segment `a` into regions. """
-    a_np = img_as_float(a.cpu().numpy())  # Normalize
+    a_np = img_as_float(a.detach().cpu().numpy())  # Normalize
     labels = slic(a_np, n_segments=n_segments, compactness=10)
     return labels
 
@@ -40,7 +40,7 @@ def region_consistency_loss(a, b):
     count = 0  # Keep track of valid regions
 
     for i in range(min_num, num + 1):
-        mask = (labels == i)  # Extract region
+        mask = torch.from_numpy(labels == i).to(device=b.device)  # Extract region
         b_region = b[mask]
 
         if b_region.numel() <= 2 :  # Skip single-pixel regions

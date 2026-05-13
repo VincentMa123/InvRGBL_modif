@@ -56,6 +56,7 @@ class RelightRigidNodes(RelightableGaussian):
         # collect all instances
         init_means = []
         init_colors = []
+        init_intensities = []
         instances_pose = []
         instances_size = []
         instances_fv = []
@@ -63,12 +64,18 @@ class RelightRigidNodes(RelightableGaussian):
         for id_in_model, (id_in_dataset, v) in enumerate(instance_pts_dict.items()):
             init_means.append(v["pts"])
             init_colors.append(v["colors"])
+            if v.get("intensity", None) is not None:
+                init_intensities.append(v["intensity"])
             instances_pose.append(v["poses"].unsqueeze(1))
             instances_size.append(v["size"])
             instances_fv.append(v["frame_info"].unsqueeze(1))
             point_ids.append(torch.full((v["num_pts"], 1), id_in_model, dtype=torch.long))
         init_means = torch.cat(init_means, dim=0).to(self.device) # (N, 3)
         init_colors = torch.cat(init_colors, dim=0).to(self.device) # (N, 3)
+        init_intensity = None
+        if len(init_intensities) > 0:
+            init_intensity = torch.cat(init_intensities, dim=0).to(self.device)
+            init_intensity = init_intensity.reshape(-1, 1)
         instances_pose = torch.cat(instances_pose, dim=1).to(self.device) # (num_frame, num_instances, 4, 4)
         self.instances_size = torch.stack(instances_size).to(self.device) # (num_instances, 3)
         self.instances_fv = torch.cat(instances_fv, dim=1).to(self.device) # (num_frame, num_instances)
@@ -127,9 +134,16 @@ class RelightRigidNodes(RelightableGaussian):
             init_colors = torch.cat((init_colors,reflectance),dim=-1)
             init_colors = init_colors.to(self.device).clamp(1e-4, 1 - 1e-4)
             self._base_color = Parameter(torch.logit(init_colors))
-            init_reflectivity = torch.full((init_means.shape[0], 1), 0.5, device=self.device)
+            if init_intensity is not None and init_intensity.numel() == init_means.shape[0]:
+                intensity_min = init_intensity.min()
+                intensity_max = init_intensity.max()
+                intensity_norm = (init_intensity - intensity_min) / (intensity_max - intensity_min + 1e-6)
+                init_roughness = (1.0 - intensity_norm).clamp(1e-4, 1 - 1e-4)
+                init_reflectivity = intensity_norm.clamp(1e-4, 1 - 1e-4)
+            else:
+                init_reflectivity = torch.full((init_means.shape[0], 1), 0.5, device=self.device)
+                init_roughness = torch.full((init_means.shape[0], 1), 0.7, device=self.device)
             self._reflectivity = Parameter(torch.logit(init_reflectivity.clamp(1e-4, 1 - 1e-4)))
-            init_roughness = torch.full((init_means.shape[0], 1), 0.7, device=self.device)
             self._roughness = Parameter(torch.logit(init_roughness.clamp(1e-4, 1 - 1e-4)))
             init_metallic = torch.full((init_means.shape[0], 1), 0.02, device=self.device)
             self._metallic = Parameter(torch.logit(init_metallic.clamp(1e-4, 1 - 1e-4)))

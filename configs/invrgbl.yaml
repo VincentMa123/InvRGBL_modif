@@ -22,9 +22,11 @@ trainer:
       strength: 0.35
       specular_strength: 0.2
       depth_bias: 0.02
+    sun_visibility_update_interval: 250
+    sun_visibility_chunk_size: 262144
   losses:
     rgb:
-      w: 0.8
+      w: 1.0
     ssim:
       w: 0.2
     mask:
@@ -47,7 +49,7 @@ trainer:
     albedo_pre:
       w: 0.1
     albedo:
-      w: 0.01
+      w: 0.05
     rgb_detail_albedo:
       enabled: true
       w: 0.005
@@ -68,7 +70,7 @@ trainer:
     sun_visibility:
       w: 0.1
     intensity:
-      w: 0.1
+      w: 1.0
     ref_neighborhood_smoothness:
       w: 0.01
     ref_region_consistency:
@@ -136,7 +138,7 @@ trainer:
     cull_scale_thresh: 0.5
     cull_screen_size: 0.15
     split_screen_size: 0.04
-    stop_screen_size_at: 8000
+    stop_screen_size_at: 12000
     stop_split_at: 15000
     sh_degree: 3
 model:

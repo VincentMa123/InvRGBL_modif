@@ -24,15 +24,16 @@ class EnvironmentMap(nn.Module):
         self.min_roughness = min_roughness
         self.max_roughness = max_roughness
         
-        # Learnable base map [H, W, 3]
+        # Learnable linear HDR radiance. Store an unconstrained parameter and
+        # map it through softplus so optimization cannot create negative light.
         base = torch.rand(h, w, 3, dtype=torch.float32) * 0.3 + 0.35
-        self.base = nn.Parameter(base)
+        self.base = nn.Parameter(torch.log(torch.expm1(base.clamp_min(1e-4))))
         self.build_mips()
     
     def build_mips(self):
         """Build Gaussian pyramid for prefiltered specular sampling."""
         self.specular = []
-        current = self.base.permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
+        current = F.softplus(self.base).permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
         self.specular.append(current.clone())
         
         # Build downsampled mips

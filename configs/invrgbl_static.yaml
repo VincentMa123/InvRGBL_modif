@@ -25,6 +25,8 @@ trainer:
       strength: 0.35
       specular_strength: 0.2
       depth_bias: 0.02
+    sun_visibility_update_interval: 250
+    sun_visibility_chunk_size: 262144
   losses:
     rgb:
       w: 0.8

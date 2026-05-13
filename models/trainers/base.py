@@ -110,6 +110,7 @@ class BasicTrainer(nn.Module):
         self._visibility_tracings_list = {}
         self._incident_dirs_list = {}
         self._incident_areas_list = {}    
+        self._sun_visibility_tracings_list = {}
         self.labels = {}
         
         self.freeze_step = freeze_step 
@@ -346,6 +347,85 @@ class BasicTrainer(nn.Module):
                 self._incident_areas_list.update({self.cur_frame.item(): incident_areas_result.detach().cpu()}) 
         #del raytracer
 
+    def update_sun_visibility(self, update=False, sun_direction=None):
+        """Trace direct sun visibility only.
+
+        The envmap image-space PBR path still needs hard direct-sun shadows, but
+        it does not need the full Monte Carlo sky visibility cache used by the
+        legacy per-Gaussian renderer.
+        """
+        if sun_direction is None:
+            if "Sky" not in self.models:
+                return
+            sun_direction = self.models["Sky"].get_sun_direction()
+
+        if self.cur_frame.item() in self._sun_visibility_tracings_list.keys():
+            vis_num = self._sun_visibility_tracings_list[self.cur_frame.item()].shape[0]
+            pc_number = 0
+            for class_name in self.gaussian_classes.keys():
+                pc_number = pc_number + self.models[class_name].num_points
+            if pc_number != vis_num:
+                update = True
+
+        if (self.cur_frame.item() in self._sun_visibility_tracings_list.keys()) and not update:
+            return
+
+        means = []
+        scalings = []
+        quats = []
+        gaussians_inverse_covariance = []
+        gaussians_opacity = []
+        gaussians_normal = []
+        with torch.no_grad():
+            for class_name in self.gaussian_classes.keys():
+                means.append(self.models[class_name].get_xyz)
+                scalings.append(self.models[class_name].get_scaling)
+                quats.append(self.models[class_name].get_quats)
+                gaussians_inverse_covariance.append(self.models[class_name].get_inverse_covariance())
+                gaussians_opacity.append(self.models[class_name].get_opacity[:, 0])
+                gaussians_normal.append(self.models[class_name].get_normal)
+
+            gaussians_xyz = means = torch.concat(means)
+            scalings = torch.concat(scalings)
+            quats = torch.concat(quats)
+            raytracer = RayTracer(means, scalings, quats)
+            gaussians_inverse_covariance = torch.concat(gaussians_inverse_covariance)
+            gaussians_opacity = torch.concat(gaussians_opacity)
+            gaussians_normal = torch.concat(gaussians_normal)
+
+            sun_direction = sun_direction.to(device=gaussians_xyz.device, dtype=gaussians_xyz.dtype)
+            sun_direction = sun_direction / sun_direction.norm().clamp_min(1e-6)
+
+            visibility_results = []
+            chunk_size = int(self.render_cfg.get("sun_visibility_chunk_size", 262144))
+            chunk_size = max(1, min(chunk_size, gaussians_xyz.shape[0]))
+            for offset in tqdm(range(0, gaussians_xyz.shape[0], chunk_size), "Update sun visibility with raytracing."):
+                dirs = sun_direction.view(1, 1, 3).expand(
+                    gaussians_xyz[offset:offset + chunk_size].shape[0], 1, 3
+                )
+                trace_results = raytracer.trace_visibility(
+                    gaussians_xyz[offset:offset + chunk_size, None].expand_as(dirs),
+                    dirs,
+                    gaussians_xyz,
+                    gaussians_inverse_covariance,
+                    gaussians_opacity,
+                    gaussians_normal,
+                )
+                sun_visibility = trace_results["visibility"]
+                if sun_visibility.dim() == 3:
+                    sun_visibility = sun_visibility[:, 0, :]
+                elif sun_visibility.dim() == 1:
+                    sun_visibility = sun_visibility[:, None]
+                visibility_results.append(sun_visibility.clamp(0.0, 1.0))
+
+            sun_visibility_result = torch.cat(visibility_results, dim=0)
+            del raytracer
+            if self.cur_frame.item() in self._sun_visibility_tracings_list:
+                del self._sun_visibility_tracings_list[self.cur_frame.item()]
+            self._sun_visibility_tracings_list.update(
+                {self.cur_frame.item(): sun_visibility_result.detach().cpu()}
+            )
+
     def rebuild_all_visibility(self, num_frames: int, sun_direction=None):
         """Rebuild BVH visibility caches for all frames at current model state.
         
@@ -356,9 +436,11 @@ class BasicTrainer(nn.Module):
         self._visibility_tracings_list.clear()
         self._incident_dirs_list.clear()
         self._incident_areas_list.clear()
+        self._sun_visibility_tracings_list.clear()
         for t in range(num_frames):
             self.cur_frame = torch.tensor(t, device=self.device)
             self.update_visibility(update=True, sun_direction=sun_direction)
+            self.update_sun_visibility(update=True, sun_direction=sun_direction)
         logger.info("Visibility cache rebuild complete.")
 
     def reinitialize_optimizer(self,train_sky=False,train_incident=False,train_vis=False) -> None:
@@ -664,10 +746,18 @@ class BasicTrainer(nn.Module):
             "class_labels": [],
         }
         
-        # Skip BVH visibility tracing during training when image-space PBR is active.
-        # The old per-Gaussian PBR (which needs BVH caches) is bypassed in render_gaussians().
-        use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
-        if not use_ispbr_train:
+        use_image_space_pbr = self.pbr and 'EnvMap' in self.models and 'Sky' in self.models
+        if sun_direction is None and 'Sky' in self.models:
+            sun_direction = self.models['Sky'].get_sun_direction()
+
+        if use_image_space_pbr:
+            sun_update = update
+            if self.training:
+                update_interval = int(self.render_cfg.get("sun_visibility_update_interval", 250))
+                if update_interval > 0:
+                    sun_update = sun_update or (self.step % update_interval == 0)
+            self.update_sun_visibility(update=sun_update, sun_direction=sun_direction)
+        else:
             if (self.step > self.freeze_step) and (self.step % 100 == 1):
                 update = random.random() < 0.01   
             
@@ -700,15 +790,14 @@ class BasicTrainer(nn.Module):
         extras = None
         if self.pbr:
             extras = {'normals':gs_dict["_normals"],"albedos":gs_dict["_albedos"],"roughness":gs_dict["_roughness"], "metallic":gs_dict["_metallic"], "reflectivity":gs_dict["_reflectivity"], "_incidents":gs_dict["_incidents"]}
-            use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
-            if use_ispbr_train:
-                # BVH caches are not built during training; provide dummy tensors
+            if use_image_space_pbr:
                 num_pts = gs_dict["_means"].shape[0]
+                sun_visibility = self._sun_visibility_tracings_list[self.cur_frame.item()].to(self.device)
                 extras.update({
                     '_incident_dirs': torch.zeros(num_pts, 1, 3, device=self.device),
                     '_visibility_tracing': torch.ones(num_pts, 1, device=self.device),
                     '_incident_areas': torch.ones(num_pts, 1, 1, device=self.device),
-                    "sun_visibility": gs_dict["_sun_visibility"]})
+                    "sun_visibility": sun_visibility})
             else:
                 extras.update({
                     '_incident_dirs':self._incident_dirs_list[self.cur_frame.item()].to(self.device),
@@ -758,10 +847,11 @@ class BasicTrainer(nn.Module):
                 #assert direct_light_env_light is not None
                 intensity = rendering_equation_lidar(reflectivity,roughness,normals.detach(), viewdirs,view_dists.detach())
 
-                # Skip expensive per-Gaussian PBR during training when image-space PBR is active.
-                # This avoids BVH ray-tracing and old MC shading overhead.
-                use_ispbr_train = self.training and 'EnvMap' in self.models and 'Sky' in self.models
-                if use_ispbr_train:
+                # Skip legacy per-Gaussian MC PBR whenever the image-space
+                # envmap path is active. Direct sun shadows are supplied by the
+                # dedicated BVH sun-visibility cache.
+                use_image_space_pbr = 'EnvMap' in self.models and 'Sky' in self.models
+                if use_image_space_pbr:
                     # Dummy channels to maintain rasterizer split structure
                     brdf_color = torch.zeros_like(albedos)
                     diffuse_light = torch.zeros_like(albedos)
@@ -881,18 +971,16 @@ class BasicTrainer(nn.Module):
                             depth_bias=float(envmap_ao_cfg.get("depth_bias", 0.02)),
                         )
 
-                    pbr_albedo = rendered_albedos.detach() if self.training else rendered_albedos
-                    pbr_normal = rendered_normal.detach() if self.training else rendered_normal
-                    pbr_roughness = rendered_roughness.detach() if self.training else rendered_roughness
+                    pbr_albedo = rendered_albedos
+                    pbr_normal = rendered_normal
+                    pbr_roughness = rendered_roughness
                     pbr_metallic = (
                         torch.zeros_like(rendered_metallic)
                         if (not self.training and getattr(self, "relight_force_dielectric", False))
                         else rendered_metallic
                     )
-                    if self.training:
-                        pbr_metallic = pbr_metallic.detach()
-                    pbr_sun_visibility = rendered_sun_visibility.detach() if self.training else rendered_sun_visibility
-                    pbr_reflectivity = rendered_reflectivity.detach() if self.training else rendered_reflectivity
+                    pbr_sun_visibility = rendered_sun_visibility
+                    pbr_reflectivity = rendered_reflectivity
 
                     pbr_rgb = image_space_pbr(
                         albedo_map=pbr_albedo,
@@ -1194,11 +1282,21 @@ class BasicTrainer(nn.Module):
             pbr_loss_name = "pbr" if stage2_active else "pbr_pre"
             loss_dict["pbr_loss"] = self.get_loss_weight(pbr_loss_name) * Ll1_pbr
 
+        if "intensity_images" in image_infos and "rendered_intensity" in outputs:
+            intensity_mask = (image_infos["intensity_images"] > 1e-3).float()
+            intensity_mask = intensity_mask * valid_loss_mask[..., None]
+            if intensity_mask.sum() > 0:
+                intensity_diff = torch.abs(outputs["rendered_intensity"] - image_infos["intensity_images"])
+                Ll1_intensity = (intensity_diff * intensity_mask).sum() / intensity_mask.sum().clamp_min(1.0)
+            else:
+                Ll1_intensity = outputs["rendered_intensity"].sum() * 0.0
+            loss_dict["intensity_loss"] = self.get_loss_weight("intensity") * Ll1_intensity
+
         # Material priors are active in Stage 1. After freeze, roughness,
         # normals, metallic, and sun visibility are fixed; RGB/LiDAR albedo and
-        # lighting continue to train through consistency losses. RGB/PBR
-        # reconstruction gradients do not update albedo during training because
-        # rendered_rgb stays on the SH path and image-space PBR detaches albedo.
+        # lighting continue to train through consistency and PBR losses. The
+        # albedo prior and RGB-LiDAR consistency terms keep PBR gradients from
+        # collapsing shadows into RGB albedo.
         if not stage2_active and "roughness_images" in image_infos:
             roughness_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
             rendered_roughness = outputs["rendered_roughness"] * roughness_images_mask
@@ -1308,12 +1406,6 @@ class BasicTrainer(nn.Module):
                 loss_dict["diffuse_light_loss"] = self.get_loss_weight("diffuse_light") * loss_light
 
             if "intensity_images" in image_infos and "albedo_images" in image_infos:
-                intensity_images_mask = valid_loss_mask[..., None] * (image_infos['intensity_images'] > 1e-3) 
-                rendered_intensity = outputs["rendered_intensity"] * intensity_images_mask
-                intensity_images = image_infos['intensity_images'] * intensity_images_mask
-                Ll1_intensity = torch.abs(rendered_intensity - intensity_images).mean()
-                loss_dict["intensity_loss"] = self.get_loss_weight("intensity") * Ll1_intensity
-
                 images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
                 rendered_reflectivity = outputs["rendered_reflectivity"] * images_mask
                 gt_albedo = image_infos["albedo_images"] * images_mask
@@ -1323,11 +1415,10 @@ class BasicTrainer(nn.Module):
                 loss_dict["ref_neighborhood_smoothness_loss"] = self.get_loss_weight("ref_neighborhood_smoothness") * ref_neighborhood_smoothness_loss
 
                 predicted_albedo = outputs["rendered_albedos"] * images_mask
-                # Skip expensive CPU-based SLIC segmentation when image-space PBR is active.
-                # region_consistency_loss calls slic() on CPU every step (~1.4s/step).
-                if not use_ispbr_train:
-                    ref_region_consistency_loss = self.region_consistency_loss(rendered_reflectivity.detach(), predicted_albedo.mean(dim=-1))
-                    loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency_albedo") * ref_region_consistency_loss
+                ref_region_consistency_loss = self.region_consistency_loss(
+                    rendered_reflectivity.detach(), predicted_albedo.mean(dim=-1)
+                )
+                loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency_albedo") * ref_region_consistency_loss
 
         # dynamic region loss
         dynamic_region_cfg = self.losses_dict.get("dynamic_region", None)

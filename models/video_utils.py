@@ -342,7 +342,9 @@ def render(
 
             if "diffuse_light" in results:
                 diffuse_light = results["diffuse_light"]
-                diffuse_light = diffuse_light / diffuse_light.max()
+                max_light = diffuse_light.max()
+                if max_light > 0:
+                    diffuse_light = diffuse_light / max_light
                 diffuse_lights.append(get_numpy(diffuse_light))    
 
             if "rendered_normal" in results:

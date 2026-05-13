@@ -3,9 +3,11 @@ __pycache__/
 *.so
 *.egg-info/
 /data/
+
 /work_dirs/
 
 AGENTS.md
 report.txt
 preprocess_lidar_intensity_023.sbatch
 relight_023.sbatch
+image.png

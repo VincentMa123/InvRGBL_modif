@@ -3,6 +3,17 @@ from utils.graphics_utils import sample_incident_rays
 import torch.nn.functional as F
 import numpy as np
 
+def srgb_to_linear(x):
+    x = x.clamp(0.0, 1.0)
+    return torch.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055).pow(2.4))
+
+def linear_to_srgb(x):
+    x = x.clamp_min(0.0)
+    return torch.where(x <= 0.0031308, x * 12.92, 1.055 * x.pow(1.0 / 2.4) - 0.055)
+
+def reinhard_tonemap(x):
+    return x / (1.0 + x)
+
 def GGX_specular(
         normal,
         pts2c,
@@ -311,7 +322,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
         viewdir_map: [H, W, 3] view directions per pixel (world space)
         env_map: EnvironmentMap instance
         sun_dir: [3] normalized sun direction
-        sun_intensity: [3] sun RGB intensity
+        sun_intensity: [3] linear sun RGB intensity
         spotlights: optional list of spotlights for inference
         depth_map: optional [H, W, 1] for spotlight distance computation
         means_map: optional [H, W, 3] world positions for spotlight computation
@@ -327,7 +338,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
     
     # Flatten for batch processing
     N = H * W
-    albedo = albedo_map.reshape(N, 3).clamp(min=0)
+    albedo = srgb_to_linear(albedo_map.reshape(N, 3))
     normal = F.normalize(normal_map.reshape(N, 3), dim=-1)
     roughness = roughness_map.reshape(N, 1).clamp(min_roughness, 1.0)
     metallic = metallic_map.reshape(N, 1).clamp(0, 1)
@@ -370,7 +381,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
     
     sun_dir = F.normalize(sun_dir, dim=-1)
     NoL = (normal * sun_dir).sum(-1, keepdim=True).clamp(min=0)
-    sun_light = NoL * sun_intensity.to(device) * 3
+    sun_light = NoL * F.softplus(sun_intensity.to(device)) * 3
     sun_light = sun_light.clip(0, 10)
     
     # Sun diffuse
@@ -394,6 +405,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
     
     # ---- Combine all contributions ----
     pbr = diffuse + specular + sun_diffuse + sun_specular + spotlight_contrib
+    pbr = linear_to_srgb(reinhard_tonemap(pbr))
     
     # Defensive: catch NaN/Inf early in image-space PBR before they corrupt means
     if torch.isnan(pbr).any() or torch.isinf(pbr).any():

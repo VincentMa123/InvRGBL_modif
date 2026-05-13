@@ -323,6 +323,7 @@ class DrivingDataset(SceneDataset):
                         "node_type": cur_node_type,
                         "pts": [],
                         "colors": [],
+                        "intensity": [],
                         # "flows": [],
                     }
                 # get the pose of the instance at the given frame
@@ -342,6 +343,9 @@ class DrivingDataset(SceneDataset):
                 )
                 valid_pts = o_pts[mask]
                 valid_colors = self.lidar_source.colors[lidar_dict["lidar_mask"]][mask]
+                if hasattr(self.lidar_source, "intensities"):
+                    valid_intensity = self.lidar_source.intensities[lidar_dict["lidar_mask"]][mask]
+                    instance_dict[ins_id]["intensity"].append(valid_intensity)
                 # valid_flows = lidar_dict["lidar_flows"][mask]
                 instance_dict[ins_id]["pts"].append(valid_pts)
                 instance_dict[ins_id]["colors"].append(valid_colors)
@@ -351,6 +355,10 @@ class DrivingDataset(SceneDataset):
         for ins_id in instance_dict:
             instance_dict[ins_id]["pts"] = torch.cat(instance_dict[ins_id]["pts"], dim=0)
             instance_dict[ins_id]["colors"] = torch.cat(instance_dict[ins_id]["colors"], dim=0)
+            if len(instance_dict[ins_id]["intensity"]) > 0:
+                instance_dict[ins_id]["intensity"] = torch.cat(instance_dict[ins_id]["intensity"], dim=0)
+            else:
+                instance_dict[ins_id]["intensity"] = None
             # instance_dict[ins_id]["flows"] = torch.cat(instance_dict[ins_id]["flows"], dim=0)
             instance_dict[ins_id]["num_pts"] = instance_dict[ins_id]["pts"].shape[0]
             if instance_dict[ins_id]["num_pts"] > instance_max_pts:
@@ -358,6 +366,8 @@ class DrivingDataset(SceneDataset):
                 sampled_idx = torch.randperm(instance_dict[ins_id]["num_pts"])[:instance_max_pts]
                 instance_dict[ins_id]["pts"] = instance_dict[ins_id]["pts"][sampled_idx]
                 instance_dict[ins_id]["colors"] = instance_dict[ins_id]["colors"][sampled_idx]
+                if instance_dict[ins_id]["intensity"] is not None:
+                    instance_dict[ins_id]["intensity"] = instance_dict[ins_id]["intensity"][sampled_idx]
                 # instance_dict[ins_id]["flows"] = instance_dict[ins_id]["flows"][sampled_idx]
                 instance_dict[ins_id]["num_pts"] = instance_max_pts
             logger.info(f"Instance {ins_id} has {instance_dict[ins_id]['num_pts']} lidar sample points")
