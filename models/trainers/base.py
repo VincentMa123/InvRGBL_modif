@@ -429,7 +429,7 @@ class BasicTrainer(nn.Module):
         # self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.optim_general.get("use_grad_scaler", False))
     
     def freeze_stage2_fixed_gaussian_params(self) -> None:
-        """Freeze geometry/topology and fixed intrinsic params for stage-2 fitting."""
+        """Freeze topology and fixed intrinsics while refining RGB/LiDAR albedo."""
         frozen_attrs = (
             "_means",
             "_scales",
@@ -438,7 +438,6 @@ class BasicTrainer(nn.Module):
             "_features_dc",
             "_features_rest",
             "_normals",
-            "_base_color",
             "_roughness",
             "_metallic",
             "_sun_visibility",
@@ -454,7 +453,7 @@ class BasicTrainer(nn.Module):
                 if param is not None:
                     param.requires_grad_(False)
                     frozen_report.append(f"{class_name}.{attr_name}")
-            for attr_name in ("_reflectivity",):
+            for attr_name in ("_base_color", "_reflectivity"):
                 param = getattr(model, attr_name, None)
                 if param is not None and param.requires_grad:
                     trainable_report.append(f"{class_name}.{attr_name}")
@@ -482,7 +481,6 @@ class BasicTrainer(nn.Module):
             "scaling",
             "rotation",
             "normal",
-            "base_color",
             "roughness",
             "metallic",
             "sun_visibility",
@@ -573,7 +571,7 @@ class BasicTrainer(nn.Module):
         # lighting with the consistency losses.
         if step >= self.freeze_step:
             if not self.freezed:
-                print('Stage 2: freezing geometry, opacity, albedo, normals/roughness/metallic; training reflectivity and lighting')
+                print('Stage 2: freezing geometry, opacity, normals/roughness/metallic; training RGB/LiDAR albedo and lighting')
                 self.final_cull_before_freeze()
                 self.freeze_stage2_fixed_gaussian_params()
                 self.initialize_optimizer()
@@ -916,7 +914,7 @@ class BasicTrainer(nn.Module):
                     )
 
                     rendered_pbr = pbr_rgb
-                    if not self.training:
+                    if (not self.training) and self.render_cfg.get("eval_use_pbr_rgb", False):
                         rendered_rgb = pbr_rgb
                 
                 info.update({'rendered_normal':rendered_normal,
@@ -1064,6 +1062,78 @@ class BasicTrainer(nn.Module):
             return loss_cfg.w
         return loss_cfg
 
+    def compute_rgb_detail_albedo_loss(
+        self,
+        rgb: torch.Tensor,
+        gt_albedo: torch.Tensor,
+        pred_albedo: torch.Tensor,
+        valid_loss_mask: torch.Tensor,
+        sky_mask: torch.Tensor,
+        dynamic_mask: Optional[torch.Tensor],
+        opacity: Optional[torch.Tensor],
+        cfg,
+    ) -> torch.Tensor:
+        """Conservative stage-2 cue for bright material detail missed by RGB-X."""
+        if cfg is None or not cfg.get("enabled", True):
+            return pred_albedo.sum() * 0.0
+
+        kernel_size = int(cfg.get("blur_kernel", 15))
+        kernel_size = max(kernel_size, 3)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        def blur_map(x: torch.Tensor) -> torch.Tensor:
+            pad = kernel_size // 2
+            x4 = x.permute(2, 0, 1).unsqueeze(0)
+            x4 = F.pad(x4, (pad, pad, pad, pad), mode="replicate")
+            x4 = F.avg_pool2d(x4, kernel_size=kernel_size, stride=1)
+            return x4.squeeze(0).permute(1, 2, 0)
+
+        with torch.no_grad():
+            rgb_detached = rgb.detach().clamp(0.0, 1.0)
+            prior_detached = gt_albedo.detach().clamp(0.0, 1.0)
+
+            rgb_luma = (
+                0.299 * rgb_detached[..., 0:1]
+                + 0.587 * rgb_detached[..., 1:2]
+                + 0.114 * rgb_detached[..., 2:3]
+            )
+            prior_luma = (
+                0.299 * prior_detached[..., 0:1]
+                + 0.587 * prior_detached[..., 1:2]
+                + 0.114 * prior_detached[..., 2:3]
+            )
+            rgb_detail = rgb_luma - blur_map(rgb_luma)
+            prior_detail = prior_luma - blur_map(prior_luma)
+
+            rgb_max = rgb_detached.max(dim=-1, keepdim=True).values
+            rgb_min = rgb_detached.min(dim=-1, keepdim=True).values
+            saturation = rgb_max - rgb_min
+
+            detail_mask = (
+                (rgb_luma > float(cfg.get("luma_thresh", 0.55))).float()
+                * (rgb_detail > float(cfg.get("contrast_thresh", 0.08))).float()
+                * (prior_detail < float(cfg.get("prior_contrast_thresh", 0.03))).float()
+                * (saturation < float(cfg.get("saturation_thresh", 0.25))).float()
+                * (1.0 - sky_mask[..., None]).float()
+                * valid_loss_mask[..., None].float()
+            )
+
+            if dynamic_mask is not None and cfg.get("exclude_dynamic", True):
+                detail_mask = detail_mask * (1.0 - dynamic_mask[..., None]).float()
+            if opacity is not None:
+                opacity_thresh = float(cfg.get("opacity_thresh", 0.5))
+                detail_mask = detail_mask * (opacity.detach() > opacity_thresh).float()
+
+            target_albedo = torch.maximum(prior_detached, rgb_detached)
+
+        # Hinge loss: only raise missing bright albedo detail, never darken it.
+        per_pixel_loss = F.relu(target_albedo - pred_albedo) * detail_mask
+        denom = (detail_mask.sum() * pred_albedo.shape[-1]).clamp_min(1.0)
+        detail_loss = per_pixel_loss.sum() / denom
+        min_pixels = float(cfg.get("min_mask_pixels", 32))
+        return detail_loss * (detail_mask.sum() >= min_pixels).float()
+
 
     def compute_losses(
         self,
@@ -1125,8 +1195,10 @@ class BasicTrainer(nn.Module):
             loss_dict["pbr_loss"] = self.get_loss_weight(pbr_loss_name) * Ll1_pbr
 
         # Material priors are active in Stage 1. After freeze, roughness,
-        # albedo, normals, metallic, and sun visibility are fixed; RGB/LiDAR
-        # reflectivity and lighting continue to train through consistency losses.
+        # normals, metallic, and sun visibility are fixed; RGB/LiDAR albedo and
+        # lighting continue to train through consistency losses. RGB/PBR
+        # reconstruction gradients do not update albedo during training because
+        # rendered_rgb stays on the SH path and image-space PBR detaches albedo.
         if not stage2_active and "roughness_images" in image_infos:
             roughness_images_mask = (1 - image_infos["sky_masks"][..., None]) * valid_loss_mask[..., None]
             rendered_roughness = outputs["rendered_roughness"] * roughness_images_mask
@@ -1161,6 +1233,22 @@ class BasicTrainer(nn.Module):
                 loss_dict["albedo_loss"] = self.get_loss_weight("albedo") * Ll1_albedo
             else:
                 loss_dict["albedo_loss"] = self.get_loss_weight("albedo_pre") * Ll1_albedo
+
+            detail_cfg = self.losses_dict.get("rgb_detail_albedo", None)
+            if detail_cfg is not None and stage2_active:
+                rgb_detail_albedo_loss = self.compute_rgb_detail_albedo_loss(
+                    rgb=image_infos["pixels"],
+                    gt_albedo=image_infos["albedo_images"],
+                    pred_albedo=outputs["rendered_albedos"],
+                    valid_loss_mask=valid_loss_mask,
+                    sky_mask=image_infos["sky_masks"],
+                    dynamic_mask=image_infos.get("dynamic_masks", None),
+                    opacity=outputs.get("opacity", None),
+                    cfg=detail_cfg,
+                )
+                loss_dict["rgb_detail_albedo_loss"] = (
+                    self.get_loss_weight("rgb_detail_albedo") * rgb_detail_albedo_loss
+                )
             
             # Metallic consistency: bright albedo should be non-metallic (diffuse).
             # This prevents the model from cheating with metallic+dark_albedo on white cars.

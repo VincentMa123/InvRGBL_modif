@@ -189,12 +189,12 @@ def check_albedo_leak_controls():
     )
     print(f"  [{'PASS' if detaches_materials else 'FAIL'}] PBR loss detaches material maps during training")
 
-    base_color_frozen = (
-        '"_base_color",' in base_code
-        and '"base_color",' in base_code
-        and 'for attr_name in ("_reflectivity",):' in base_code
+    base_color_trainable = (
+        '"_base_color",' not in base_code.split("frozen_attrs = (", 1)[1].split(")", 1)[0]
+        and '"base_color",' not in base_code.split("frozen_components = {", 1)[1].split("}", 1)[0]
+        and 'for attr_name in ("_base_color", "_reflectivity"):' in base_code
     )
-    print(f"  [{'PASS' if base_color_frozen else 'FAIL'}] _base_color is frozen in Stage 2")
+    print(f"  [{'PASS' if base_color_trainable else 'FAIL'}] _base_color remains trainable in Stage 2")
 
     ao_controls = (
         "def compute_screen_space_ao" in pbr_code
@@ -204,7 +204,7 @@ def check_albedo_leak_controls():
     )
     print(f"  [{'PASS' if ao_controls else 'FAIL'}] EnvMap diffuse/specular receive screen-space AO")
 
-    return assigns_pbr and eval_only_rgb and detaches_materials and base_color_frozen and ao_controls
+    return assigns_pbr and eval_only_rgb and detaches_materials and base_color_trainable and ao_controls
 
 
 def main():

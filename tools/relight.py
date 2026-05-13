@@ -137,6 +137,7 @@ def build_dataset_and_trainer(args: argparse.Namespace):
     cfg = OmegaConf.merge(cfg, OmegaConf.from_cli(args.opts))
 
     cfg.logging.save_seperate_video = not args.save_catted_videos
+    cfg.trainer.render.eval_use_pbr_rgb = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = DrivingDataset(data_cfg=cfg.data)

@@ -18,6 +18,7 @@ trainer:
     sparse_grad: false # whether to use sparse gradient for rendering, supported by gsplat kernel
     batch_size: 1 # batch size for rendering, currently only support 1
     pbr: true
+    eval_use_pbr_rgb: false
     envmap_ao:
       enabled: true
       radius: 5
@@ -50,6 +51,17 @@ trainer:
       w: 0.1
     albedo:
       w: 0.05
+    rgb_detail_albedo:
+      enabled: true
+      w: 0.005
+      luma_thresh: 0.55
+      contrast_thresh: 0.08
+      saturation_thresh: 0.25
+      prior_contrast_thresh: 0.03
+      blur_kernel: 15
+      opacity_thresh: 0.5
+      exclude_dynamic: true
+      min_mask_pixels: 32
     roughness:
       w: 0.1
     smooth_roughness:
