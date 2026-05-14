@@ -102,14 +102,18 @@ def render_images(
         vis_indices (Optional[List[int]], optional): Indices to visualize. Defaults to None.
     """
     trainer.set_eval()
-    # Rebuild visibility caches for all frames to avoid temporal flickering
-    # from stale per-frame BVH data computed at different training steps.
-    if hasattr(trainer, 'rebuild_all_visibility') and hasattr(dataset, 'num_img_timesteps'):
-        # Pass actual sun direction so rendering_equation() gets correct sun visibility
-        sun_dir = None
-        if 'Sky' in trainer.models:
-            sun_dir = trainer.models['Sky'].get_sun_direction()
-        trainer.rebuild_all_visibility(dataset.num_img_timesteps, sun_direction=sun_dir)
+    if hasattr(trainer, "invalidate_visibility_frames"):
+        indices = vis_indices if vis_indices is not None else range(len(dataset))
+        rendered_frame_indices = []
+        num_cams = getattr(dataset.datasource, "num_cams", 1)
+        for local_idx in indices:
+            global_idx = dataset.split_indices[local_idx]
+            rendered_frame_indices.append(global_idx // num_cams)
+        use_image_space_pbr = trainer.pbr and "EnvMap" in trainer.models and "Sky" in trainer.models
+        trainer.invalidate_visibility_frames(
+            rendered_frame_indices,
+            full=not use_image_space_pbr,
+        )
     render_results = render(
         dataset,
         trainer=trainer,

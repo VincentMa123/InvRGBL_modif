@@ -432,16 +432,35 @@ class BasicTrainer(nn.Module):
         This ensures temporal consistency in rendered_pbr during eval.
         """
         logger.info(f"Rebuilding visibility caches for all {num_frames} frames...")
+        use_image_space_pbr = self.pbr and "EnvMap" in self.models and "Sky" in self.models
         # Clear old caches
-        self._visibility_tracings_list.clear()
-        self._incident_dirs_list.clear()
-        self._incident_areas_list.clear()
+        if not use_image_space_pbr:
+            self._visibility_tracings_list.clear()
+            self._incident_dirs_list.clear()
+            self._incident_areas_list.clear()
         self._sun_visibility_tracings_list.clear()
+        old_cur_frame = self.cur_frame
         for t in range(num_frames):
             self.cur_frame = torch.tensor(t, device=self.device)
-            self.update_visibility(update=True, sun_direction=sun_direction)
+            if not use_image_space_pbr:
+                self.update_visibility(update=True, sun_direction=sun_direction)
             self.update_sun_visibility(update=True, sun_direction=sun_direction)
+        self.cur_frame = old_cur_frame
         logger.info("Visibility cache rebuild complete.")
+
+    def invalidate_visibility_frames(self, frame_indices, full=True):
+        """Drop stale BVH caches for the requested frames.
+
+        Rendering code will rebuild the missing cache lazily for exactly the
+        frames it renders. This avoids rebuilding every timestep for a one-frame
+        training visualization.
+        """
+        for frame_idx in set(int(t) for t in frame_indices):
+            self._sun_visibility_tracings_list.pop(frame_idx, None)
+            if full:
+                self._visibility_tracings_list.pop(frame_idx, None)
+                self._incident_dirs_list.pop(frame_idx, None)
+                self._incident_areas_list.pop(frame_idx, None)
 
     def reinitialize_optimizer(self,train_sky=False,train_incident=False,train_vis=False) -> None:
         # get param groups first
@@ -751,12 +770,17 @@ class BasicTrainer(nn.Module):
             sun_direction = self.models['Sky'].get_sun_direction()
 
         if use_image_space_pbr:
+            sun_train_start_step = int(
+                self.render_cfg.get("sun_visibility_train_start_step", self.freeze_step)
+            )
+            use_bvh_sun_visibility = (not self.training) or (self.step >= sun_train_start_step)
             sun_update = update
-            if self.training:
+            if self.training and use_bvh_sun_visibility:
                 update_interval = int(self.render_cfg.get("sun_visibility_update_interval", 250))
                 if update_interval > 0:
                     sun_update = sun_update or (self.step % update_interval == 0)
-            self.update_sun_visibility(update=sun_update, sun_direction=sun_direction)
+            if use_bvh_sun_visibility:
+                self.update_sun_visibility(update=sun_update, sun_direction=sun_direction)
         else:
             if (self.step > self.freeze_step) and (self.step % 100 == 1):
                 update = random.random() < 0.01   
@@ -792,7 +816,11 @@ class BasicTrainer(nn.Module):
             extras = {'normals':gs_dict["_normals"],"albedos":gs_dict["_albedos"],"roughness":gs_dict["_roughness"], "metallic":gs_dict["_metallic"], "reflectivity":gs_dict["_reflectivity"], "_incidents":gs_dict["_incidents"]}
             if use_image_space_pbr:
                 num_pts = gs_dict["_means"].shape[0]
-                sun_visibility = self._sun_visibility_tracings_list[self.cur_frame.item()].to(self.device)
+                cached_sun_visibility = self._sun_visibility_tracings_list.get(self.cur_frame.item(), None)
+                if cached_sun_visibility is None or cached_sun_visibility.shape[0] != num_pts:
+                    sun_visibility = torch.ones(num_pts, 1, device=self.device)
+                else:
+                    sun_visibility = cached_sun_visibility.to(self.device)
                 extras.update({
                     '_incident_dirs': torch.zeros(num_pts, 1, 3, device=self.device),
                     '_visibility_tracing': torch.ones(num_pts, 1, device=self.device),
