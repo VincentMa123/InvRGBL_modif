@@ -1,0 +1,335 @@
+InvRGBL envmap / LiDAR reflectivity debugging handout
+=====================================================
+
+Context
+-------
+Repo: InvRGBL_modif
+Run being debugged: work_dirs/invrgbl/waymo023_dyn_1cam_ispbr
+Dataset scene: Waymo scene 023, usually 1 camera.
+
+The user modified the original InvRGBL code to use an image-space envmap PBR path.
+Observed issues:
+- rendered_sun_visibility looked gray/noisy/streaky instead of a clean shadow mask.
+- rendered_reflectivity got worse over training and showed strong LiDAR scan-line artifacts.
+- rendered_roughness / other intrinsic maps also showed LiDAR scan-line artifacts.
+- rendered_albedos looked game-like / overly synthetic.
+- rendered_pbr did not look photorealistic.
+- Training slowed a lot after the BVH sun-visibility and envmap fixes.
+
+
+Paper loss mapping to this codebase
+-----------------------------------
+Paper total loss:
+  L_total = lambda1 L_lidar + lambda2 L_rgb + lambda3 L_nor + lambda4 L_mat
+            + lambda5 L_rgb->lidar + lambda6 L_lidar->rgb
+
+Code mapping:
+- L_lidar:
+  models/trainers/base.py intensity_loss.
+  Compares outputs["rendered_intensity"] to image_infos["intensity_images"].
+
+- L_rgb:
+  rgb_loss + ssim_loss on outputs["rgb"].
+  pbr_loss on outputs["rendered_pbr"] is extra / envmap branch supervision.
+
+- L_nor:
+  gt_normal_loss + smooth_normal_loss.
+
+- L_mat:
+  albedo_loss, roughness_loss, plus extra smooth/detail/metallic consistency terms.
+
+- L_rgb->lidar:
+  ref_neighborhood_smoothness_loss =
+    neighborhood_smoothness_loss(albedo_mean, rendered_reflectivity)
+  This updates reflectivity and says reflectivity should be smooth where RGB albedo is smooth.
+
+- L_lidar->rgb:
+  ref_region_consistency_loss =
+    region_consistency_loss(rendered_reflectivity.detach(), predicted_albedo.mean(...))
+  This does NOT update reflectivity because reflectivity is detached.
+  It uses reflectivity as a fixed region guide and updates RGB albedo.
+
+Both consistency losses are Stage 2 only:
+  stage2_active = self.step > self.freeze_step
+With freeze_step: 15000, they start after step 15000.
+
+
+Important conceptual conclusions
+--------------------------------
+1. rendered_reflectivity is not directly loaded from LiDAR intensity.
+   It is a learned per-Gaussian scalar parameter:
+     self._reflectivity -> sigmoid -> rasterized -> rendered_reflectivity
+
+2. LiDAR intensity influences reflectivity indirectly:
+   reflectivity -> rendering_equation_lidar(...) -> rendered_intensity
+   rendered_intensity is compared to projected intensity_images.
+
+3. rendered_reflectivity is scalar LiDAR/NIR-ish reflectance, not visible RGB paint color.
+   It can help relighting as a material cue, but visible car shine is mainly roughness,
+   normals, env/sun lighting, and BRDF.
+
+4. region_consistency_loss(rendered_reflectivity.detach(), albedo) does not fix reflectivity.
+   It only trains albedo to be consistent inside reflectivity-derived SLIC regions.
+
+5. Diffuse_light output being black in the envmap branch is expected.
+   The envmap path skips the legacy per-Gaussian MC PBR and currently sets:
+     brdf_color = zeros
+     diffuse_light = zeros
+   So diffuse_light is a stale legacy debug channel, not envmap lighting.
+
+6. rendered_sun_visibility is not a clean 2D shadow mask.
+   It is per-Gaussian BVH sun visibility rasterized into image space.
+   Sky/empty regions show black because there are no Gaussians.
+   Streaks can come from messy Gaussian geometry, self-occlusion, and LiDAR-line geometry.
+
+
+Preprocessing / intensity maps
+------------------------------
+User command used for projected LiDAR intensity:
+
+python -u tools/custom/build_waymo_intensity_lut.py \
+    --data_root data/waymo/processed/training \
+    --scene_ids 023 \
+    --min_range 1 \
+    --max_range 80 \
+    --per_scene_lut \
+    --normalized_dirname lidar_normalized \
+    --overwrite_normalized \
+    --project_to_intensity \
+    --projected_dirname intensity \
+    --overwrite_projected \
+    --projection_window 5 \
+    --projection_dilation_kernel 1 \
+    --projection_normalize fixed \
+    --projection_clip_max 2.0 \
+    --projection_gamma 1.0
+
+projection_window=5 temporally stacks nearby scans, but with dilation_kernel=1 the target is
+still sparse exact projected pixels. It does not create dense supervision.
+
+Suggested experiments:
+- Current sparse/clean:
+  --projection_window 5 --projection_dilation_kernel 1
+- More supervision, modest bleeding:
+  --projection_window 5 --projection_dilation_kernel 3
+- Less dynamic-object ghosting:
+  --projection_window 3 --projection_dilation_kernel 3
+
+Do not jump to kernel=5 unless gt_intensity overlays look clean.
+
+
+Debug script added
+------------------
+Added:
+  tools/custom/visualize_gt_intensity.py
+
+Run from repo root:
+  python tools/custom/visualize_gt_intensity.py \
+    --data_root data/waymo/processed/training \
+    --scene 023 \
+    --frame 0 \
+    --camera 0
+
+Outputs:
+  debug/gt_intensity/023/000_0/gt_intensity.png
+  debug/gt_intensity/023/000_0/gt_intensity_mask.png
+  debug/gt_intensity/023/000_0/gt_intensity_overlay.png
+  debug/gt_intensity/023/000_0/gt_intensity_hist.png
+  debug/gt_intensity/023/000_0/rgb.png
+
+All cameras:
+  python tools/custom/visualize_gt_intensity.py \
+    --data_root data/waymo/processed/training \
+    --scene 023 \
+    --frame 0 \
+    --all_cameras
+
+Use --scale percentile for visualization contrast only.
+
+
+Main code/config changes made during this debugging
+---------------------------------------------------
+1. Envmap / PBR color pipeline
+   File: models/modules_envmap.py
+   - EnvMap stores unconstrained base logits and uses softplus for positive HDR radiance.
+
+   File: models/trainers/pbr.py
+   - Added srgb_to_linear, linear_to_srgb, reinhard_tonemap.
+   - image_space_pbr converts albedo from sRGB to linear before shading.
+   - Uses positive HDR sun/env values and tone-maps/gamma-converts final output.
+
+2. Object/static LiDAR intensity initialization
+   File: datasets/driving_dataset.py
+   - get_init_objects now passes LiDAR intensity for rigid objects when available.
+
+   File: models/nodes/relight_rigid.py
+   File: models/gaussians/relightgs.py
+   - Reflectivity can initialize from normalized LiDAR intensity.
+   - Later changed roughness so it no longer initializes from LiDAR intensity.
+     Roughness now starts at 0.7, while reflectivity still gets intensity init.
+
+3. Image-space PBR material gradients
+   File: models/trainers/base.py
+   - Removed training detaches from PBR material buffers so PBR can train albedo/roughness/etc.
+   - But LiDAR intensity now uses roughness.detach() and normals.detach() so intensity loss
+     does not push roughness/normal into LiDAR scan-line artifacts.
+
+4. BVH sun visibility cache
+   File: models/trainers/base.py
+   - Added update_sun_visibility() for direct sun only.
+   - Envmap path uses this instead of full legacy multi-direction update_visibility().
+   - Added invalidate_visibility_frames() for lazy eval/visualization cache refresh.
+
+   File: models/video_utils.py
+   - render_images() no longer rebuilds visibility for all frames before rendering a single
+     visualization. It invalidates only rendered frame caches and lets rendering rebuild lazily.
+
+5. Stage 1 sun visibility speed / noise guard
+   File: configs/invrgbl.yaml
+   File: configs/invrgbl_static.yaml
+   Added:
+     trainer.render.sun_visibility_train_start_step: 15000
+     trainer.render.sun_visibility_update_interval: 250
+     trainer.render.sun_visibility_chunk_size: 262144
+
+   File: models/trainers/base.py
+   - If step < sun_visibility_train_start_step, envmap branch uses an all-visible fallback
+     instead of BVH sun tracing. This avoids slow/noisy BVH visibility while geometry is still
+     changing in Stage 1.
+
+6. Intensity loss normalization configuration
+   File: configs/invrgbl.yaml
+   File: configs/invrgbl_static.yaml
+   Added:
+     trainer.losses.intensity.normalize_valid_pixels: false
+
+   File: models/trainers/base.py
+   - If normalize_valid_pixels=true:
+       Ll1 = sum(valid_error) / num_valid_pixels
+     This is strong and can amplify sparse LiDAR scan-line artifacts.
+   - If normalize_valid_pixels=false:
+       Ll1 = mean(valid_error over whole image)
+     This is closer to the old diluted behavior and should reduce stripe pressure.
+
+7. Optimizer densification robustness
+   File: models/gaussians/basics.py
+   - remove_from_optim and dup_in_optim now handle params with empty Adam state.
+   - This fixed KeyError: 'exp_avg' when _sun_visibility stopped receiving gradients.
+
+8. Loss utility fixes
+   File: models/losses.py
+   - segment_a_with_slic detaches before converting to numpy.
+   - region_consistency_loss converts numpy label mask back to a torch mask on b.device.
+
+9. Video utils small fix
+   File: models/video_utils.py
+   - Avoid divide-by-zero when normalizing diffuse_light.
+
+
+Current debated / sensitive changes
+-----------------------------------
+The user did not fully agree with all recent changes. Important sensitive points:
+
+1. Intensity valid-pixel normalization
+   User suspected this change caused stripes. A config was added:
+     trainer.losses.intensity.normalize_valid_pixels
+   Default is now false.
+
+2. Roughness detach from LiDAR intensity
+   Current code uses roughness.detach() inside rendering_equation_lidar().
+   Reason: LiDAR intensity should train reflectivity, not force roughness to reproduce sparse
+   LiDAR scan-line structure.
+   User may want to revisit this if they believe roughness should participate.
+
+3. Roughness no longer initializes from LiDAR intensity
+   Reason: LiDAR/NIR return is not visual roughness and carried scan-line artifacts.
+   Reflectivity still initializes from intensity.
+
+4. sun_visibility_train_start_step=15000
+   Before this step, envmap branch uses all-visible fallback.
+   This speeds up training and avoids noisy Stage 1 BVH visibility, but means Stage 1
+   rendered_sun_visibility debug images are not meaningful BVH shadow maps.
+
+
+What to check in the next session
+---------------------------------
+1. Confirm the running job is using the latest config.
+   Saved work_dirs/.../config.yaml must include:
+     trainer.losses.intensity.normalize_valid_pixels: false
+     trainer.render.sun_visibility_train_start_step: 15000
+
+2. If rendered_sun_visibility at step 10000 still shows streaky BVH output, the job is likely
+   running old code/config. With the latest patch, before step 15000 it should use the fallback.
+
+3. For a clean test, restart from step 0.
+   Some changes affect initialization and will not fully fix a resumed checkpoint:
+   - roughness no longer initialized from LiDAR intensity
+   - intensity loss normalization config
+
+4. Judge albedo after Stage 2, not step 10000.
+   RGB-LiDAR consistency starts after freeze_step=15000.
+   Better checkpoints to inspect: 18k, 20k, 25k, 30k.
+
+5. Judge sun_visibility after step >= 15000.
+   Before that, it is intentionally fallback / not a real BVH shadow map.
+
+6. If reflectivity is too weak with normalize_valid_pixels=false, try:
+     trainer.losses.intensity.w=0.1 or 0.2 with normalize_valid_pixels=true
+   or use dilation_kernel=3 while keeping normalize_valid_pixels=false.
+
+7. If image-space PBR is still slow, try:
+     trainer.render.envmap_ao.enabled=false
+
+8. If albedo still looks game-like:
+   Remember rendered_albedos is intrinsic material color, not final RGB.
+   rendered_pbr is the photometric output to judge relighting realism.
+   Possible next checks:
+   - albedo prior quality in albedo_rgbx/
+   - roughness prior quality in rough_rgbx/
+   - envmap learned values / sky intensity
+   - PBR loss weight pbr_pre/pbr
+   - whether albedo prior is too strong or too smooth
+
+
+Useful file locations
+---------------------
+Intensity preprocessing:
+  tools/custom/build_waymo_intensity_lut.py
+
+Intensity visualization:
+  tools/custom/visualize_gt_intensity.py
+
+Dataset intensity loading:
+  datasets/base/pixel_source.py
+
+Main loss code:
+  models/trainers/base.py
+
+Region / neighborhood consistency losses:
+  models/losses.py
+
+Envmap PBR:
+  models/trainers/pbr.py
+  models/modules_envmap.py
+
+Reflectivity params:
+  models/gaussians/relightgs.py
+  models/nodes/relight_rigid.py
+
+Training visualization:
+  tools/train.py
+  models/video_utils.py
+
+
+Verification notes
+------------------
+Local Windows/SSHFS Python execution sometimes failed with:
+  "A specified logon session does not exist"
+and py_compile could not reliably run locally.
+
+Where checks were possible:
+- git diff --check passed for edited files.
+- AST / syntax checks were previously used for some files when py_compile hit SSHFS issues.
+
+Do not assume all runtime behavior has been fully validated until a short training smoke test
+is run on the actual training machine.

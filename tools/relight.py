@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datasets.driving_dataset import DrivingDataset
+from datasets.base.split_wrapper import SplitWrapper
 from models.video_utils import render_images, render_novel_views, save_videos
 from utils.misc import import_str
 from utils.logging import setup_logging
@@ -33,6 +34,31 @@ DEFAULT_KEYS = [
 ]
 
 
+PRESETS = {
+    "afternoon": {
+        "sun_direction": "-0.45,-0.35,0.82",
+        "sun_intensity": "4.0,3.8,3.4",
+        "env_scale": 1.15,
+        "env_color": "1.02,1.04,1.08",
+        "min_roughness": 0.35,
+    },
+    "sunset": {
+        "sun_direction": "-0.92,-0.20,0.20",
+        "sun_intensity": "5.0,2.4,0.9",
+        "env_scale": 0.70,
+        "env_color": "1.35,0.78,0.45",
+        "min_roughness": 0.40,
+    },
+    "night": {
+        "sun_direction": "-0.45,-0.35,0.82",
+        "sun_intensity": "0.0,0.0,0.0",
+        "env_constant": "0.015,0.025,0.055",
+        "min_roughness": 0.45,
+        "force_dielectric": True,
+    },
+}
+
+
 def parse_vec(text: Optional[str], name: str, allow_scalar: bool = False) -> Optional[torch.Tensor]:
     if text is None:
         return None
@@ -51,6 +77,31 @@ def parse_keys(text: Optional[str]) -> List[str]:
     return keys if keys else DEFAULT_KEYS
 
 
+def inverse_softplus(x: torch.Tensor) -> torch.Tensor:
+    x = x.clamp_min(1e-6)
+    return x + torch.log(-torch.expm1(-x))
+
+
+def apply_preset_defaults(args: argparse.Namespace) -> None:
+    if args.preset == "none":
+        return
+    preset = PRESETS[args.preset]
+    if args.sun_direction is None and "sun_direction" in preset:
+        args.sun_direction = preset["sun_direction"]
+    if args.sun_intensity is None and "sun_intensity" in preset:
+        args.sun_intensity = preset["sun_intensity"]
+    if args.env_color is None and "env_color" in preset:
+        args.env_color = preset["env_color"]
+    if args.env_constant is None and "env_constant" in preset:
+        args.env_constant = preset["env_constant"]
+    if args.env_scale == 1.0 and "env_scale" in preset:
+        args.env_scale = preset["env_scale"]
+    if args.min_roughness == 0.35 and "min_roughness" in preset:
+        args.min_roughness = preset["min_roughness"]
+    if not args.force_dielectric and preset.get("force_dielectric", False):
+        args.force_dielectric = True
+
+
 def load_spotlights(path: Optional[str]) -> Optional[List[Dict]]:
     if path is None:
         return None
@@ -64,14 +115,16 @@ def load_spotlights(path: Optional[str]) -> Optional[List[Dict]]:
     return spotlights
 
 
-def load_envmap_tensor(path: str, device: torch.device) -> torch.Tensor:
+def load_envmap_tensor(path: str, device: torch.device) -> tuple[torch.Tensor, bool]:
+    is_parameter = False
     if path.endswith(".npy"):
         env = torch.from_numpy(np.load(path)).float()
     else:
         loaded = torch.load(path, map_location="cpu")
         if isinstance(loaded, dict):
-            for key in ("base", "envmap", "EnvMap#base"):
+            for key in ("base", "EnvMap#base", "envmap"):
                 if key in loaded:
+                    is_parameter = key in ("base", "EnvMap#base")
                     loaded = loaded[key]
                     break
         if not torch.is_tensor(loaded):
@@ -79,7 +132,7 @@ def load_envmap_tensor(path: str, device: torch.device) -> torch.Tensor:
         env = loaded.float()
     if env.ndim != 3 or env.shape[-1] != 3:
         raise ValueError(f"environment map must have shape [H, W, 3], got {tuple(env.shape)}")
-    return env.to(device)
+    return env.to(device), is_parameter
 
 
 def resize_envmap(env: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -107,22 +160,22 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
     if "EnvMap" in trainer.models:
         env_map = trainer.models["EnvMap"]
         with torch.no_grad():
+            radiance = F.softplus(env_map.base.data)
             if args.envmap_path is not None:
-                env = load_envmap_tensor(args.envmap_path, env_map.base.device)
+                env, is_parameter = load_envmap_tensor(args.envmap_path, env_map.base.device)
                 env = resize_envmap(env, env_map.base.shape[0], env_map.base.shape[1])
-                env_map.base.data.copy_(env)
+                radiance = F.softplus(env) if is_parameter else env.clamp_min(0.0)
 
             if args.env_constant is not None:
                 color = parse_vec(args.env_constant, "--env_constant", allow_scalar=True)
-                env_map.base.data.fill_(1.0)
-                env_map.base.data.mul_(color.to(env_map.base.device))
+                radiance = color.to(env_map.base.device).view(1, 1, 3).expand_as(radiance).clone()
 
             env_color = parse_vec(args.env_color, "--env_color", allow_scalar=True)
             if env_color is not None:
-                env_map.base.data.mul_(env_color.to(env_map.base.device))
+                radiance = radiance * env_color.to(env_map.base.device).view(1, 1, 3)
 
-            env_map.base.data.mul_(float(args.env_scale))
-            env_map.base.data.clamp_(min=0.0)
+            radiance = (radiance * float(args.env_scale)).clamp_min(0.0)
+            env_map.base.data.copy_(inverse_softplus(radiance))
 
         env_map.build_mips()
 
@@ -157,6 +210,25 @@ def build_dataset_and_trainer(args: argparse.Namespace):
     return cfg, dataset, trainer
 
 
+def limit_split_dataset(split_dataset, max_frames: Optional[int], num_cams: int):
+    if split_dataset is None:
+        return None, 0
+
+    total_timestamps = (len(split_dataset) + num_cams - 1) // num_cams
+    if max_frames is None or max_frames <= 0:
+        return split_dataset, total_timestamps
+
+    max_images = int(max_frames) * int(num_cams)
+    limited_indices = split_dataset.split_indices[:max_images]
+    limited = SplitWrapper(
+        datasource=split_dataset.datasource,
+        split_indices=limited_indices,
+        split=split_dataset.split,
+    )
+    rendered_timestamps = (len(limited_indices) + num_cams - 1) // num_cams
+    return limited, rendered_timestamps
+
+
 def render_split(
     trainer,
     dataset,
@@ -171,7 +243,22 @@ def render_split(
         logger.info("Skipping %s split because it is not available", split_name)
         return
 
+    num_cams = dataset.pixel_source.num_cams
+    split_dataset, num_timestamps = limit_split_dataset(
+        split_dataset, args.max_frames, num_cams
+    )
+    if len(split_dataset) == 0:
+        logger.info("Skipping %s split because frame limit produced no images", split_name)
+        return
+
     logger.info("Rendering %s relighting split", split_name)
+    if args.max_frames is not None and args.max_frames > 0:
+        logger.info(
+            "Limited %s relighting split to %d frame(s), %d image(s)",
+            split_name,
+            num_timestamps,
+            len(split_dataset),
+        )
     results = render_images(
         trainer=trainer,
         dataset=split_dataset,
@@ -183,11 +270,9 @@ def render_split(
         results,
         save_path,
         layout=dataset.layout,
-        num_timestamps=(
-            dataset.num_test_timesteps if split_name == "test" else dataset.num_img_timesteps
-        ),
+        num_timestamps=num_timestamps,
         keys=keys,
-        num_cams=dataset.pixel_source.num_cams,
+        num_cams=num_cams,
         save_seperate_video=cfg.logging.save_seperate_video,
         save_images=args.save_images,
         fps=cfg.render.fps,
@@ -237,6 +322,7 @@ def main(args: argparse.Namespace) -> None:
 
     logger.info("Saving relighting results to %s", output_dir)
     logger.info("Video keys: %s", ", ".join(keys))
+    logger.info("Relighting preset: %s", args.preset)
 
     if args.split in ("full", "both"):
         render_split(
@@ -254,8 +340,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("Render relit InvRGBL videos from a trained checkpoint")
     parser.add_argument("--resume_from", type=str, required=True, help="checkpoint path")
     parser.add_argument("--name", type=str, default="relight", help="output subfolder name")
+    parser.add_argument("--preset", choices=["none", "afternoon", "sunset", "night"], default="none")
     parser.add_argument("--output_dir", type=str, default=None, help="explicit output directory")
     parser.add_argument("--split", choices=["full", "test", "both", "none"], default="full")
+    parser.add_argument("--max_frames", type=int, default=None, help="render only the first N timesteps from each split")
     parser.add_argument("--render_novel", action="store_true", help="render configured novel trajectories")
     parser.add_argument("--keys", type=str, default=None, help="comma-separated video keys to save")
     parser.add_argument("--save_catted_videos", action="store_true", help="save one concatenated video per split")
@@ -272,4 +360,6 @@ if __name__ == "__main__":
     parser.add_argument("--spotlights", type=str, default=None, help="JSON list of spotlight dictionaries")
 
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="OmegaConf overrides")
-    main(parser.parse_args())
+    parsed_args = parser.parse_args()
+    apply_preset_defaults(parsed_args)
+    main(parsed_args)

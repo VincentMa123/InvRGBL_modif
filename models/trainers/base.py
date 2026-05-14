@@ -1313,9 +1313,14 @@ class BasicTrainer(nn.Module):
         if "intensity_images" in image_infos and "rendered_intensity" in outputs:
             intensity_mask = (image_infos["intensity_images"] > 1e-3).float()
             intensity_mask = intensity_mask * valid_loss_mask[..., None]
+            intensity_cfg = self.losses_dict.get("intensity", {})
+            normalize_valid_pixels = bool(intensity_cfg.get("normalize_valid_pixels", False))
             if intensity_mask.sum() > 0:
                 intensity_diff = torch.abs(outputs["rendered_intensity"] - image_infos["intensity_images"])
-                Ll1_intensity = (intensity_diff * intensity_mask).sum() / intensity_mask.sum().clamp_min(1.0)
+                if normalize_valid_pixels:
+                    Ll1_intensity = (intensity_diff * intensity_mask).sum() / intensity_mask.sum().clamp_min(1.0)
+                else:
+                    Ll1_intensity = (intensity_diff * intensity_mask).mean()
             else:
                 Ll1_intensity = outputs["rendered_intensity"].sum() * 0.0
             loss_dict["intensity_loss"] = self.get_loss_weight("intensity") * Ll1_intensity

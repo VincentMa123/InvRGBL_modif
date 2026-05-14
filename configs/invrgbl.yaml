@@ -72,6 +72,7 @@ trainer:
       w: 0.1
     intensity:
       w: 1.0
+      normalize_valid_pixels: false
     ref_neighborhood_smoothness:
       w: 0.05
     ref_region_consistency:
