@@ -172,6 +172,8 @@ class WaymoPixelSource(ScenePixelSource):
                 downscale_when_loading=self.data_cfg.downscale_when_loading[idx],
                 undistort=self.data_cfg.undistort,
                 buffer_downscale=self.buffer_downscale,
+                load_region_maps=self.data_cfg.get("load_region_maps", False),
+                region_map_dir=self.data_cfg.get("region_map_dir", "region_sam_reflectivity"),
                 device=self.device,
             )
             camera.load_time(self.normalized_time)

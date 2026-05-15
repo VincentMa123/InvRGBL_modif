@@ -25,6 +25,8 @@ data:
     load_dynamic_mask: True # whether to load dynamic mask
     load_objects: True # whether to load object bounding boxes
     load_smpl: False #True # whether to load SMPL template for pedestrians
+    load_region_maps: False # whether to load cached SAM region labels
+    region_map_dir: region_sam_reflectivity # cached region label directory under the scene
     sampler: # error based image sampler
       buffer_downscale: 8 # downscale factor for the buffer wrt load_size
       buffer_ratio: 0.5 # the percentage of images sampled according to the error buffer

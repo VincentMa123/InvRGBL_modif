@@ -155,19 +155,10 @@ class RelightableGaussian(nn.Module):
             init_colors = torch.cat((init_colors,reflectance),dim=-1)
             init_colors = init_colors.to(self.device).clamp(1e-4, 1 - 1e-4)
             self._base_color = Parameter(torch.logit(init_colors))
-            if init_intensity is not None and init_intensity.numel() == init_means.shape[0]:
-                # Map LiDAR intensity to initial roughness:
-                # high intensity -> low roughness (specular), low intensity -> high roughness (diffuse)
-                intensity_min = init_intensity.min()
-                intensity_max = init_intensity.max()
-                intensity_norm = (init_intensity - intensity_min) / (intensity_max - intensity_min + 1e-6)
-                init_roughness = (1.0 - intensity_norm).clamp(1e-4, 1 - 1e-4)
-                init_reflectivity = intensity_norm.clamp(1e-4, 1 - 1e-4)
-                self._roughness = Parameter(torch.logit(init_roughness.to(self.device)))
-                self._reflectivity = Parameter(torch.logit(init_reflectivity.to(self.device)))
-            else:
-                init_roughness = torch.full((init_means.shape[0], 1), 0.7, device=self.device)
-                self._roughness = Parameter(torch.logit(init_roughness.clamp(1e-4, 1 - 1e-4)))
+            # Do not seed material parameters from sparse projected LiDAR intensity:
+            # the scan-line pattern can persist in roughness/reflectivity renders.
+            init_roughness = torch.full((init_means.shape[0], 1), 0.7, device=self.device)
+            self._roughness = Parameter(torch.logit(init_roughness.clamp(1e-4, 1 - 1e-4)))
 
             init_metallic = torch.full((init_means.shape[0], 1), 0.02, device=self.device)
             self._metallic = Parameter(torch.logit(init_metallic.clamp(1e-4, 1 - 1e-4)))

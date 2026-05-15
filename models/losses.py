@@ -2,55 +2,67 @@ import numpy as np
 from typing import Literal, Union
 
 import torch
-import torch.nn.functional as F
-from torch import autograd, nn, Tensor
-from skimage.segmentation import slic
-from skimage.util import img_as_float
-
-
-import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import autograd, Tensor
 
-from PIL import Image
-from sklearn.cluster import KMeans
+def region_consistency_loss_from_labels(
+    region_labels: torch.Tensor,
+    values: torch.Tensor,
+    valid_mask: torch.Tensor,
+    min_region_pixels: int = 3,
+) -> torch.Tensor:
+    """Mean per-region variance of values inside cached integer regions.
 
+    Label 0 is reserved for ignored pixels. Gradients flow to ``values`` only.
+    """
+    if values.dim() == 2:
+        values = values[..., None]
+    if values.dim() != 3:
+        raise ValueError(f"values must have shape [H,W] or [H,W,C], got {tuple(values.shape)}")
 
-from skimage.segmentation import slic
-from skimage.util import img_as_float
+    labels = region_labels.to(device=values.device)
+    if labels.dim() == 3 and labels.shape[-1] == 1:
+        labels = labels[..., 0]
+    if labels.shape != values.shape[:2]:
+        raise ValueError(
+            f"region_labels shape {tuple(labels.shape)} must match values spatial shape {tuple(values.shape[:2])}"
+        )
+    labels = labels.long()
 
+    mask = valid_mask.to(device=values.device)
+    if mask.dim() == 3 and mask.shape[-1] == 1:
+        mask = mask[..., 0]
+    if mask.shape != values.shape[:2]:
+        raise ValueError(
+            f"valid_mask shape {tuple(mask.shape)} must match values spatial shape {tuple(values.shape[:2])}"
+        )
+    mask = (mask > 0) & (labels > 0) & torch.isfinite(values).all(dim=-1)
 
+    if not mask.any():
+        return values.sum() * 0.0
 
+    flat_labels = labels[mask]
+    flat_values = values[mask]
+    _, inverse = torch.unique(flat_labels, sorted=False, return_inverse=True)
+    num_regions = int(inverse.max().item()) + 1
 
-def segment_a_with_slic(a, n_segments=100):
-    """ Use SLIC to segment `a` into regions. """
-    a_np = img_as_float(a.detach().cpu().numpy())  # Normalize
-    labels = slic(a_np, n_segments=n_segments, compactness=10)
-    return labels
+    counts = torch.bincount(inverse, minlength=num_regions).to(dtype=flat_values.dtype)
+    keep = counts >= int(min_region_pixels)
+    if not keep.any():
+        return values.sum() * 0.0
 
-def region_consistency_loss(a, b):
-    eps=1e-6
-    """ Compute variance of `b` within each connected region of `a`. """
-    labels = segment_a_with_slic(a)  # Find connected regions
+    channels = flat_values.shape[-1]
+    scatter_index = inverse[:, None].expand(-1, channels)
+    sums = flat_values.new_zeros((num_regions, channels))
+    sums_sq = flat_values.new_zeros((num_regions, channels))
+    sums.scatter_add_(0, scatter_index, flat_values)
+    sums_sq.scatter_add_(0, scatter_index, flat_values * flat_values)
 
-    min_num = labels.min()
-    num = labels.max()
-    loss = 0.0
-    count = 0  # Keep track of valid regions
-
-    for i in range(min_num, num + 1):
-        mask = torch.from_numpy(labels == i).to(device=b.device)  # Extract region
-        b_region = b[mask]
-
-        if b_region.numel() <= 2 :  # Skip single-pixel regions
-            continue
-
-        var_b = torch.var(b_region,dim=0).mean() + eps  # Add small epsilon to avoid NaN
-        loss += var_b
-        count += 1
-
-    return loss / (count + eps)  # Normalize by number of valid regions
+    denom = counts[:, None].clamp_min(1.0)
+    mean = sums / denom
+    variance = (sums_sq / denom - mean * mean).clamp_min(0.0)
+    return variance.mean(dim=-1)[keep].mean()
 
 def neighborhood_smoothness_loss(a, b, sigma=1.0):
     dx = b[:, :-1] - b[:, 1:]  
@@ -220,6 +232,8 @@ class ScaleAndShiftInvariantLoss(nn.Module):
 # end copy
 
 def constraint_loss(reference_map, prediction, mask):
+    from sklearn.cluster import KMeans
+
     # Simulated reference map: H x W x 3
     H, W, C = reference_map.shape
     # Flatten the spatial dimensions for clustering
@@ -287,6 +301,8 @@ def ref_map_smooth_loss(normal_map, mask):
 
 
 def save_tensor_as_image(tensor, file_name):
+    from PIL import Image
+
     # Convert tensor from shape (3, H, W) to (H, W, 3)
     # Assuming the tensor values are in range [0, 1] or [0, 255]
     tensor = np.transpose(tensor.detach().cpu().numpy(), (1, 2, 0))

@@ -16,6 +16,12 @@ trainer:
     batch_size: 1
     pbr: true
     eval_use_pbr_rgb: false
+    env_diffuse_scale: 1.0
+    env_specular_scale: 1.0
+    env_diffuse_mode: learned
+    env_ambient_floor: 0.0
+    use_shadow_map: false
+    shadow_map_size: 2048
     envmap_ao:
       enabled: true
       radius: 5
@@ -53,7 +59,7 @@ trainer:
       w: 0.1
     rgb_detail_albedo:
       enabled: true
-      w: 0.005
+      w: 0.001
       luma_thresh: 0.55
       contrast_thresh: 0.08
       saturation_thresh: 0.25
@@ -72,7 +78,7 @@ trainer:
       w: 0.1
     intensity:
       w: 1.0
-      normalize_valid_pixels: false
+      normalize_valid_pixels: true
     ref_neighborhood_smoothness:
       w: 0.05
     ref_region_consistency:
@@ -81,6 +87,7 @@ trainer:
       w: 0.05
     ref_region_consistency_albedo:
       w: 0.05
+      min_region_pixels: 3
     gt_normal:
       w: 0.1
     smooth_normal:
@@ -140,7 +147,7 @@ trainer:
     cull_scale_thresh: 0.5
     cull_screen_size: 0.15
     split_screen_size: 0.04
-    stop_screen_size_at: 12000
+    stop_screen_size_at: 10000
     stop_split_at: 15000
     sh_degree: 3
 model:
@@ -250,6 +257,8 @@ data:
     load_dynamic_mask: true
     load_objects: true
     load_smpl: false
+    load_region_maps: false
+    region_map_dir: region_sam_reflectivity
     sampler:
       buffer_downscale: 8
       buffer_ratio: 0.5

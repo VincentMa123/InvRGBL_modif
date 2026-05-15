@@ -125,6 +125,10 @@ class CameraData(object):
         undistort: bool = False,
         # whether to use buffer sampling
         buffer_downscale: float = 1.0,
+        # whether to load cached integer region labels
+        load_region_maps: bool = False,
+        # directory name containing cached region label .npy files
+        region_map_dir: str = "region_sam_reflectivity",
         # the device to move the camera to
         device: torch.device = torch.device("cpu"),
     ):
@@ -135,6 +139,8 @@ class CameraData(object):
         self.end_timestep = end_timestep
         self.undistort = undistort
         self.buffer_downscale = buffer_downscale
+        self.load_region_maps_enabled = load_region_maps
+        self.region_map_dir = region_map_dir
         self.device = device
 
         self.intensity_images = None
@@ -143,6 +149,7 @@ class CameraData(object):
         self.roughness_images = None
         self.shading_images = None
         self.sky_masks = None
+        self.region_labels = None
         
         self.cam_name = DATASETS_CONFIG[dataset_name][cam_id]["camera_name"]
         self.original_size = DATASETS_CONFIG[dataset_name][cam_id]["original_size"]
@@ -160,6 +167,8 @@ class CameraData(object):
         self.load_images()
         if load_dynamic_mask:
             self.load_dynamic_masks()
+        if self.load_region_maps_enabled:
+            self.load_region_maps()
         self.lidar_depth_maps = None # will be loaded by: self.load_depth()
         self.image_error_maps = None # will be built by: self.build_image_error_buffer()
         self.to(self.device)
@@ -218,6 +227,7 @@ class CameraData(object):
         intensity_filepaths,normal_filepaths = [],[]
         albedo_filepaths = []
         roughness_filepaths,shading_filepaths = [],[]
+        region_map_filepaths = []
         
         fine_mask_path = os.path.join(self.data_path, "fine_dynamic_masks")
         if os.path.exists(fine_mask_path):
@@ -265,9 +275,13 @@ class CameraData(object):
             normal_filepaths.append(
                 os.path.join(self.data_path, "normals/normal_npy", f"{t:03d}_{self.cam_id}_pred.npy")
             )
+            region_map_filepaths.append(
+                os.path.join(self.data_path, self.region_map_dir, f"{t:03d}_{self.cam_id}.npy")
+            )
         self.intensity_filepaths = np.array(intensity_filepaths)
         self.albedo_filepaths = np.array(albedo_filepaths)
         self.normal_filepaths = np.array(normal_filepaths)
+        self.region_map_filepaths = np.array(region_map_filepaths)
         self.img_filepaths = np.array(img_filepaths)
         self.dynamic_mask_filepaths = np.array(dynamic_mask_filepaths)
         self.human_mask_filepaths = np.array(human_mask_filepaths)
@@ -549,6 +563,36 @@ class CameraData(object):
         self.sky_masks = torch.from_numpy(np.stack(sky_masks, axis=0)).float()
 
 
+    def load_region_maps(self):
+        missing = [fname for fname in self.region_map_filepaths if not os.path.exists(fname)]
+        if missing:
+            preview = "\n".join(missing[:5])
+            raise FileNotFoundError(
+                f"Cached region maps are enabled for camera {self.cam_id}, but "
+                f"{len(missing)} file(s) are missing under '{self.region_map_dir}'. "
+                f"Run tools/precompute_reflectivity_sam_regions.py first. Missing examples:\n{preview}"
+            )
+
+        region_labels = []
+        for ix, fname in tqdm(
+            enumerate(self.region_map_filepaths),
+            desc="Loading region maps",
+            dynamic_ncols=True,
+            total=len(self.region_map_filepaths),
+        ):
+            labels = np.load(fname)
+            if labels.ndim == 3:
+                labels = labels[..., 0]
+            if labels.shape[:2] != (self.load_size[0], self.load_size[1]):
+                labels = cv2.resize(
+                    labels.astype(np.int32),
+                    (self.load_size[1], self.load_size[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            region_labels.append(labels.astype(np.int64, copy=False))
+        self.region_labels = torch.from_numpy(np.stack(region_labels, axis=0)).long()
+
+
 
     def load_depth(
         self,
@@ -655,6 +699,8 @@ class CameraData(object):
             self.vehicle_masks = self.vehicle_masks.to(device)
         if self.sky_masks is not None:
             self.sky_masks = self.sky_masks.to(device)
+        if self.region_labels is not None:
+            self.region_labels = self.region_labels.to(device)
         if self.lidar_depth_maps is not None:
             self.lidar_depth_maps = self.lidar_depth_maps.to(device)
         if self.image_error_maps is not None:
@@ -672,6 +718,7 @@ class CameraData(object):
         dynamic_mask, human_mask, vehicle_mask = None, None, None
         pixel_coords, normalized_time = None, None
         egocar_mask = None
+        region_labels = None
         
         if self.images is not None:
             rgb = self.images[frame_idx]
@@ -796,6 +843,19 @@ class CameraData(object):
                     .squeeze(0)
                 )
 
+        if self.region_labels is not None:
+            region_labels = self.region_labels[frame_idx]
+            if self.downscale_factor != 1.0:
+                region_labels = (
+                    torch.nn.functional.interpolate(
+                        region_labels.float().unsqueeze(0).unsqueeze(0),
+                        scale_factor=self.downscale_factor,
+                        mode="nearest",
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                    .long()
+                )
 
         if self.dynamic_masks is not None:
             dynamic_mask = self.dynamic_masks[frame_idx]
@@ -899,6 +959,7 @@ class CameraData(object):
             "vehicle_masks": vehicle_mask,
             "egocar_masks": egocar_mask,
             "lidar_depth_map": lidar_depth_map,
+            "region_labels": region_labels,
         }
         if self.normal_images is not None:
             _image_infos.update({"normal_images":normal_images})

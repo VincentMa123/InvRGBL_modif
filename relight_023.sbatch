@@ -22,53 +22,40 @@ unset CUDA_HOME
 
 set -euo pipefail
 
-# python -u tools/relight.py \
-#   --config configs/invrgbl.yaml \
-#   --checkpoint work_dirs/invrgbl/waymo023_dyn_1cam/checkpoint_final.pth \
-#   --output_dir work_dirs/invrgbl/waymo023_dyn_1cam/night \
-#   --mode night \
-#   --render_set full \
-#   --fps 10 \
-#   data.data_root=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training \
-#   data.scene_idx=23 \
-#   data.start_timestep=0 \
-#   data.end_timestep=50
+CHECKPOINT=work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/checkpoint_final.pth
+DATA_ROOT=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training
 
+COMMON_RELIGHT_OPTS=(
+    --resume_from "${CHECKPOINT}"
+    --split full
+    --max_frames 5
+    --keys rgbs,rendered_pbr,rendered_albedos,rendered_sun_visibility
+    --env_diffuse_scale 0.02
+    --env_specular_scale 0.1
+    --env_diffuse_mode neutral
+    --force_dielectric
+    --min_roughness 0.25
+    --sky_scale 0.04
+    --exposure_scale 0.35
+    --disable_affine
+    data.data_root="${DATA_ROOT}"
+    data.scene_idx=23
+    data.start_timestep=0
+    data.end_timestep=50
+)
 
-  python tools/relight.py \
-    --checkpoint work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/checkpoint_final.pth \
-    --output_dir work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/relight_afternoon_no_rigid_simple_envmap \
-    --mode sunset \
-    --render_set full \
-    --visibility_samples 128 \
-    --disable_rigid_nodes \
-    --simple_envmap \
-    --max_frames 1 \
-    data.scene_idx=23 \
-    data.data_root=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training
+# ---------- Sunset relight ----------
+python tools/relight.py \
+    --name sunset_5f \
+    --preset sunset \
+    "${COMMON_RELIGHT_OPTS[@]}"
 
-
+# ---------- Night relight ----------
+# Uncomment the next block to run night relighting instead of sunset.
+# The night preset sets sun_intensity=0 and uses a dark env_constant.
+# Keep the same veil-reduction flags for consistency.
+#
 # python tools/relight.py \
-#       --checkpoint work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/checkpoint_final.pth \
-#       --output_dir work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/relight_afternoon \
-#       --mode afternoon \
-#       --render_set train \
-#       --max_frames 10 \
-#       data.scene_idx=23 \
-#       data.data_root=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training \
-    
-
-
-# ------------------ Custom sun relighting (uncomment to use) ------------------
-# python -u tools/relight.py \
-#   --config configs/invrgbl.yaml \
-#   --checkpoint work_dirs/invrgbl/waymo023_dyn_1cam/checkpoint_final.pth \
-#   --output_dir work_dirs/invrgbl/waymo023_dyn_1cam/relight_afternoon \
-#   --sun_direction -0.5 -0.8 0.3 \
-#   --sun_intensity 2.5 \
-#   --render_set full \
-#   --fps 10 \
-#   data.data_root=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training \
-#   data.scene_idx=23 \
-#   data.start_timestep=0 \
-#   data.end_timestep=50
+#     --name night_5f \
+#     --preset night \
+#     "${COMMON_RELIGHT_OPTS[@]}"

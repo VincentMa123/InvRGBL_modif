@@ -55,6 +55,7 @@ PRESETS = {
         "env_constant": "0.015,0.025,0.055",
         "min_roughness": 0.45,
         "force_dielectric": True,
+        "sky_scale": 0.04,
     },
 }
 
@@ -100,6 +101,8 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
         args.min_roughness = preset["min_roughness"]
     if not args.force_dielectric and preset.get("force_dielectric", False):
         args.force_dielectric = True
+    if args.sky_scale == 1.0 and "sky_scale" in preset:
+        args.sky_scale = preset["sky_scale"]
 
 
 def load_spotlights(path: Optional[str]) -> Optional[List[Dict]]:
@@ -157,6 +160,10 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
         if sun_intensity is not None and hasattr(sky, "sun_intensity"):
             sky.sun_intensity.data.copy_(sun_intensity.to(sky.sun_intensity.device))
 
+        if hasattr(sky, "shs") and args.sky_scale != 1.0:
+            with torch.no_grad():
+                sky.shs.data = sky.shs.data * float(args.sky_scale)
+
     if "EnvMap" in trainer.models:
         env_map = trainer.models["EnvMap"]
         with torch.no_grad():
@@ -182,6 +189,12 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
     trainer.relight_min_roughness = float(args.min_roughness)
     trainer.relight_force_dielectric = bool(args.force_dielectric)
     trainer.spotlights = load_spotlights(args.spotlights)
+    trainer.render_cfg["eval_exposure_scale"] = float(args.exposure_scale)
+    trainer.render_cfg["eval_disable_affine"] = bool(args.disable_affine)
+    trainer.render_cfg["env_diffuse_scale"] = float(args.env_diffuse_scale)
+    trainer.render_cfg["env_specular_scale"] = float(args.env_specular_scale)
+    trainer.render_cfg["env_diffuse_mode"] = args.env_diffuse_mode
+    trainer.render_cfg["env_ambient_floor"] = float(args.env_ambient_floor)
 
 
 def build_dataset_and_trainer(args: argparse.Namespace):
@@ -358,6 +371,14 @@ if __name__ == "__main__":
     parser.add_argument("--min_roughness", type=float, default=0.35, help="eval-time roughness floor")
     parser.add_argument("--force_dielectric", action="store_true", help="set metallic to zero during relighting")
     parser.add_argument("--spotlights", type=str, default=None, help="JSON list of spotlight dictionaries")
+
+    parser.add_argument("--sky_scale", type=float, default=1.0, help="scale visible sky background SH")
+    parser.add_argument("--exposure_scale", type=float, default=1.0, help="multiply final relit RGB")
+    parser.add_argument("--disable_affine", action="store_true", help="skip learned affine color correction")
+    parser.add_argument("--env_diffuse_scale", type=float, default=1.0, help="scale EnvMap diffuse IBL")
+    parser.add_argument("--env_specular_scale", type=float, default=1.0, help="scale EnvMap specular IBL")
+    parser.add_argument("--env_diffuse_mode", choices=["learned", "neutral"], default="learned", help="diffuse IBL mode")
+    parser.add_argument("--env_ambient_floor", type=float, default=0.0, help="minimum ambient added to diffuse")
 
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="OmegaConf overrides")
     parsed_args = parser.parse_args()

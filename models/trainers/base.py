@@ -31,7 +31,11 @@ from .pbr import (
 from models.gaussians.basics import *
 from utils.graphics_utils import sample_incident_rays
 from datasets.base.pixel_source import get_rays
-from models.losses import normal_map_smooth_loss, region_consistency_loss, neighborhood_smoothness_loss
+from models.losses import (
+    normal_map_smooth_loss,
+    neighborhood_smoothness_loss,
+    region_consistency_loss_from_labels,
+)
 
 logger = logging.getLogger()
 
@@ -426,6 +430,105 @@ class BasicTrainer(nn.Module):
                 {self.cur_frame.item(): sun_visibility_result.detach().cpu()}
             )
 
+    def render_shadow_map(self, sun_direction=None, shadow_map_size=2048, update=False):
+        """Render a depth map from the sun's perspective for shadow mapping.
+        
+        This replaces soft per-Gaussian BVH visibility with hard pixel-accurate
+        shadow tests against a rasterized sun-depth map.
+        """
+        if not hasattr(self, '_sun_shadow_map_list'):
+            self._sun_shadow_map_list = {}
+            self._sun_shadow_cam_list = {}
+        
+        frame_key = self.cur_frame.item()
+        if (frame_key in self._sun_shadow_map_list) and not update:
+            return
+        
+        if sun_direction is None:
+            if "Sky" not in self.models:
+                return
+            sun_direction = self.models["Sky"].get_sun_direction()
+        sun_direction = sun_direction.to(self.device)
+        sun_direction = sun_direction / sun_direction.norm().clamp_min(1e-6)
+        
+        with torch.no_grad():
+            # Collect all Gaussian means to compute scene bounds
+            all_means = []
+            all_quats = []
+            all_scales = []
+            all_opacities = []
+            for class_name in self.gaussian_classes.keys():
+                all_means.append(self.models[class_name].get_xyz)
+                all_quats.append(self.models[class_name].get_quats)
+                all_scales.append(self.models[class_name].get_scaling)
+                all_opacities.append(self.models[class_name].get_opacity[:, 0])
+            
+            means = torch.cat(all_means)
+            quats = torch.cat(all_quats)
+            scales = torch.cat(all_scales)
+            opacities = torch.cat(all_opacities)
+            
+            # Compute scene AABB
+            scene_min = means.min(dim=0)[0]
+            scene_max = means.max(dim=0)[0]
+            scene_center = (scene_min + scene_max) / 2.0
+            scene_radius = (scene_max - scene_min).norm() / 2.0
+            
+            # Place sun camera far along sun direction
+            sun_distance = max(scene_radius * 5.0, 100.0)
+            sun_cam_pos = scene_center - sun_direction * sun_distance
+            
+            # Build camera-to-world rotation (camera looks along sun_direction)
+            from utils.camera import look_at_rotation
+            sun_R = look_at_rotation(-sun_direction).cpu().numpy()
+            sun_t = sun_cam_pos.cpu().numpy()
+            
+            from utils.graphics_utils import getWorld2View
+            sun_viewmat_np = getWorld2View(sun_R, sun_t)  # world_to_camera, [4,4]
+            sun_viewmat = torch.from_numpy(sun_viewmat_np).float().to(self.device)
+            
+            # Perspective intrinsics covering the scene at sun_distance
+            half_fov = torch.arctan(scene_radius / sun_distance)
+            fx = fy = shadow_map_size / (2.0 * torch.tan(half_fov).item())
+            cx = cy = shadow_map_size / 2.0
+            sun_K = torch.tensor([
+                [fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0]
+            ], dtype=torch.float32, device=self.device)
+            
+            # Dummy colors (depth rendering doesn't need real colors)
+            dummy_colors = torch.zeros(means.shape[0], 3, device=self.device)
+            
+            from gsplat import rasterization
+            shadow_render, shadow_alpha, _ = rasterization(
+                means=means,
+                quats=quats,
+                scales=scales,
+                opacities=opacities,
+                colors=dummy_colors,
+                viewmats=torch.linalg.inv(sun_viewmat)[None, ...],
+                Ks=sun_K[None, ...],
+                width=shadow_map_size,
+                height=shadow_map_size,
+                render_mode="D",
+                packed=self.render_cfg.packed,
+                absgrad=False,
+                sparse_grad=False,
+                rasterize_mode="classic",
+            )
+            
+            # shadow_render shape: [1, H, W, 1] for render_mode="D"
+            shadow_depth = shadow_render[0, ..., 0]  # [H, W]
+            
+            self._sun_shadow_map_list[frame_key] = shadow_depth
+            self._sun_shadow_cam_list[frame_key] = {
+                "viewmat": sun_viewmat,
+                "K": sun_K,
+                "size": shadow_map_size,
+                "direction": sun_direction,
+            }
+    
     def rebuild_all_visibility(self, num_frames: int, sun_direction=None):
         """Rebuild BVH visibility caches for all frames at current model state.
         
@@ -439,6 +542,9 @@ class BasicTrainer(nn.Module):
             self._incident_dirs_list.clear()
             self._incident_areas_list.clear()
         self._sun_visibility_tracings_list.clear()
+        if hasattr(self, '_sun_shadow_map_list'):
+            self._sun_shadow_map_list.clear()
+            self._sun_shadow_cam_list.clear()
         old_cur_frame = self.cur_frame
         for t in range(num_frames):
             self.cur_frame = torch.tensor(t, device=self.device)
@@ -449,7 +555,7 @@ class BasicTrainer(nn.Module):
         logger.info("Visibility cache rebuild complete.")
 
     def invalidate_visibility_frames(self, frame_indices, full=True):
-        """Drop stale BVH caches for the requested frames.
+        """Drop stale BVH and shadow map caches for the requested frames.
 
         Rendering code will rebuild the missing cache lazily for exactly the
         frames it renders. This avoids rebuilding every timestep for a one-frame
@@ -457,6 +563,9 @@ class BasicTrainer(nn.Module):
         """
         for frame_idx in set(int(t) for t in frame_indices):
             self._sun_visibility_tracings_list.pop(frame_idx, None)
+            if hasattr(self, '_sun_shadow_map_list'):
+                self._sun_shadow_map_list.pop(frame_idx, None)
+                self._sun_shadow_cam_list.pop(frame_idx, None)
             if full:
                 self._visibility_tracings_list.pop(frame_idx, None)
                 self._incident_dirs_list.pop(frame_idx, None)
@@ -582,7 +691,6 @@ class BasicTrainer(nn.Module):
             "scaling",
             "rotation",
             "normal",
-            "roughness",
             "metallic",
             "sun_visibility",
             "ins_rotation",
@@ -645,7 +753,7 @@ class BasicTrainer(nn.Module):
                 use_inverse_depth=depth_loss_cfg.inverse_depth,
             )
         self.depth_loss_fn = depth_loss_fn
-        self.region_consistency_loss = lambda a, b: region_consistency_loss(a, b) 
+        self.region_consistency_loss = region_consistency_loss_from_labels
     
     def optimizer_zero_grad(self) -> None:
         #self.optimizer.zero_grad()
@@ -781,6 +889,12 @@ class BasicTrainer(nn.Module):
                     sun_update = sun_update or (self.step % update_interval == 0)
             if use_bvh_sun_visibility:
                 self.update_sun_visibility(update=sun_update, sun_direction=sun_direction)
+                if self.render_cfg.get("use_shadow_map", False):
+                    self.render_shadow_map(
+                        sun_direction=sun_direction,
+                        shadow_map_size=int(self.render_cfg.get("shadow_map_size", 2048)),
+                        update=sun_update,
+                    )
         else:
             if (self.step > self.freeze_step) and (self.step % 100 == 1):
                 update = random.random() < 0.01   
@@ -1010,6 +1124,18 @@ class BasicTrainer(nn.Module):
                     pbr_sun_visibility = rendered_sun_visibility
                     pbr_reflectivity = rendered_reflectivity
 
+                    # Shadow map override: if rendered, use rasterized sun depth map
+                    shadow_map_kwargs = {}
+                    if self.render_cfg.get("use_shadow_map", False):
+                        frame_key = self.cur_frame.item()
+                        if frame_key in getattr(self, '_sun_shadow_map_list', {}):
+                            shadow_map_kwargs = {
+                                "shadow_map": self._sun_shadow_map_list[frame_key],
+                                "sun_viewmat": self._sun_shadow_cam_list[frame_key]["viewmat"],
+                                "sun_K": self._sun_shadow_cam_list[frame_key]["K"],
+                                "shadow_map_size": self._sun_shadow_cam_list[frame_key]["size"],
+                            }
+
                     pbr_rgb = image_space_pbr(
                         albedo_map=pbr_albedo,
                         normal_map=pbr_normal,
@@ -1027,7 +1153,16 @@ class BasicTrainer(nn.Module):
                         reflectivity_map=pbr_reflectivity,
                         ao_map=ao_map,
                         specular_ao_strength=specular_ao_strength,
+                        env_diffuse_scale=float(self.render_cfg.get("env_diffuse_scale", 1.0)),
+                        env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
+                        env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
+                        env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
+                        **shadow_map_kwargs,
                     )
+                    pbr_rgb = pbr_rgb * alphas[..., None]
+
+                    if (not self.training) and self.render_cfg.get("eval_exposure_scale", 1.0) != 1.0:
+                        pbr_rgb = pbr_rgb * float(self.render_cfg.get("eval_exposure_scale", 1.0))
 
                     rendered_pbr = pbr_rgb
                     if (not self.training) and self.render_cfg.get("eval_use_pbr_rgb", False):
@@ -1086,6 +1221,8 @@ class BasicTrainer(nn.Module):
         rgb_blended: torch.Tensor,
         image_infos: Dict[str, torch.Tensor]
         ):
+        if (not self.training) and self.render_cfg.get("eval_disable_affine", False):
+            return rgb_blended
         if "Affine" in self.models:
             affine_trs = self.models['Affine'](image_infos)
             rgb_transformed = (affine_trs[..., :3, :3] @ rgb_blended[..., None] + affine_trs[..., :3, 3:])[..., 0]
@@ -1447,11 +1584,26 @@ class BasicTrainer(nn.Module):
                 ref_neighborhood_smoothness_loss = neighborhood_smoothness_loss(albedo_mean[...,None], rendered_reflectivity)
                 loss_dict["ref_neighborhood_smoothness_loss"] = self.get_loss_weight("ref_neighborhood_smoothness") * ref_neighborhood_smoothness_loss
 
-                predicted_albedo = outputs["rendered_albedos"] * images_mask
-                ref_region_consistency_loss = self.region_consistency_loss(
-                    rendered_reflectivity.detach(), predicted_albedo.mean(dim=-1)
-                )
-                loss_dict["ref_region_consistency_loss"] = self.get_loss_weight("ref_region_consistency_albedo") * ref_region_consistency_loss
+                region_weight = self.get_loss_weight("ref_region_consistency_albedo", default=0.0)
+                if region_weight > 0:
+                    if "region_labels" not in image_infos:
+                        raise RuntimeError(
+                            "ref_region_consistency_albedo requires cached region labels. "
+                            "Run tools/precompute_reflectivity_sam_regions.py and train with "
+                            "data.pixel_source.load_region_maps=true, or set "
+                            "trainer.losses.ref_region_consistency_albedo.w=0."
+                        )
+                    region_cfg = self.losses_dict.get("ref_region_consistency_albedo", {})
+                    region_valid_mask = (1 - image_infos["sky_masks"]) * valid_loss_mask
+                    if "dynamic_masks" in image_infos:
+                        region_valid_mask = region_valid_mask * (1 - image_infos["dynamic_masks"])
+                    ref_region_consistency_loss = self.region_consistency_loss(
+                        image_infos["region_labels"],
+                        outputs["rendered_albedos"],
+                        region_valid_mask,
+                        min_region_pixels=int(region_cfg.get("min_region_pixels", 3)),
+                    )
+                    loss_dict["ref_region_consistency_loss"] = region_weight * ref_region_consistency_loss
 
         # dynamic region loss
         dynamic_region_cfg = self.losses_dict.get("dynamic_region", None)
