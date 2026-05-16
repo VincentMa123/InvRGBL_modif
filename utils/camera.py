@@ -47,8 +47,10 @@ def interpolate_poses(key_poses: torch.Tensor, target_frames: int) -> torch.Tens
     
     return torch.tensor(interp_poses, dtype=torch.float32, device=device)
 
-def look_at_rotation(direction: torch.Tensor, up: torch.Tensor = torch.tensor([0., 0., 1.])) -> torch.Tensor:
+def look_at_rotation(direction: torch.Tensor, up: torch.Tensor = None) -> torch.Tensor:
     """Calculate rotation matrix to look at a specific direction."""
+    if up is None:
+        up = torch.tensor([0., 0., 1.], device=direction.device, dtype=direction.dtype)
     front = torch.nn.functional.normalize(direction, dim=-1)
     right = torch.nn.functional.normalize(torch.cross(front, up), dim=-1)
     up = torch.cross(right, front)

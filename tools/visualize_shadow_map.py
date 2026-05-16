@@ -36,13 +36,35 @@ def load_checkpoint(args: argparse.Namespace, device: torch.device):
     cfg.trainer.render.use_shadow_map = True
     cfg.trainer.render.shadow_map_size = args.shadow_map_size
 
+    # --- FIX 1: Peek checkpoint to get the original num_full_images ---
+    ckpt = torch.load(args.resume_from, map_location="cpu")
+    saved_num_full_images = ckpt.get("num_full_images", None)
+    # Fallback: read embedding shape directly from AffineTransform weights
+    if saved_num_full_images is None and "Affine" in ckpt.get("models", {}):
+        saved_num_full_images = ckpt["models"]["Affine"]["embedding.weight"].shape[0]
+
+    # --- FIX 2: Limit dataset frames to only what we need for viz ---
+    # Override end_timestep so we only load frames up to the max requested frame + 1
+    frame_indices = [int(x.strip()) for x in args.frames.split(",")] if args.frames else [0]
+    max_frame_needed = max(frame_indices)
+    # Ensure we load at least enough frames for the checkpoint's Affine embedding,
+    # but cap LiDAR memory by limiting end_timestep.
+    # We need start..end to cover max_frame_needed.
+    cfg.data.start_timestep = 0
+    cfg.data.end_timestep = max(max_frame_needed + 1, 2)
+
     dataset = DrivingDataset(data_cfg=cfg.data)
+
+    # Use checkpoint's num_full_images if available; otherwise fall back to dataset.
+    # This prevents AffineTransform embedding size mismatch.
+    num_full_images = saved_num_full_images if saved_num_full_images is not None else len(dataset.full_image_set)
+
     trainer = import_str(cfg.trainer.type)(
         **cfg.trainer,
         num_timesteps=dataset.num_img_timesteps,
         model_config=cfg.model,
         num_train_images=len(dataset.train_image_set),
-        num_full_images=len(dataset.full_image_set),
+        num_full_images=num_full_images,
         test_set_indices=dataset.test_timesteps,
         scene_aabb=dataset.get_aabb().reshape(2, 3),
         device=device,
@@ -58,15 +80,22 @@ def save_depth_as_image(depth: torch.Tensor, path: str, cmap: str = "turbo"):
     """Save a depth map as a colored PNG."""
     depth_np = depth.detach().cpu().numpy()
     finite = np.isfinite(depth_np)
-    if not finite.any():
-        img = np.zeros_like(depth_np, dtype=np.uint8)
-        Image.fromarray(img).save(path)
-        return
+    # Prefer non-zero finite depths for scaling (zero = background/no-hit)
+    valid = finite & (depth_np > 0)
+    if not valid.any():
+        if not finite.any():
+            img = np.zeros_like(depth_np, dtype=np.uint8)
+            Image.fromarray(img).save(path)
+            return
+        scale_mask = finite
+    else:
+        scale_mask = valid
 
-    # Normalize to [0, 1] using 1st-99th percentile
-    lo, hi = np.percentile(depth_np[finite], [1.0, 99.0])
+    # Normalize to [0, 1] using 1st-99th percentile of valid depths
+    lo, hi = np.percentile(depth_np[scale_mask], [1.0, 99.0])
     if hi <= lo:
-        lo, hi = depth_np[finite].min(), depth_np[finite].max()
+        lo, hi = depth_np[scale_mask].min(), depth_np[scale_mask].max()
+    logger.info("Depth scale lo=%.3f hi=%.3f for %s", float(lo), float(hi), os.path.basename(path))
     norm = np.clip((depth_np - lo) / (hi - lo + 1e-6), 0.0, 1.0)
 
     if cmap == "gray":
@@ -76,7 +105,7 @@ def save_depth_as_image(depth: torch.Tensor, path: str, cmap: str = "turbo"):
 
     # Turbo colormap (matplotlib-like)
     from matplotlib import colormaps
-    turbo = colormaps.get_cmap("turbo")
+    turbo = colormaps["turbo"]
     rgb = (turbo(norm)[:, :, :3] * 255).astype(np.uint8)
     Image.fromarray(rgb).save(path)
 
@@ -118,16 +147,24 @@ def make_composite(rgb, vis, shadow_depth, output_path):
     # Bottom-left: Shadow depth map
     depth_np = shadow_depth.detach().cpu().numpy()
     finite = np.isfinite(depth_np)
-    if finite.any():
+    valid = finite & (depth_np > 0)
+    if valid.any():
+        lo, hi = np.percentile(depth_np[valid], [1.0, 99.0])
+        if hi <= lo:
+            lo, hi = depth_np[valid].min(), depth_np[valid].max()
+        logger.info("Composite depth scale lo=%.3f hi=%.3f for %s", float(lo), float(hi), os.path.basename(output_path))
+        norm = np.clip((depth_np - lo) / (hi - lo + 1e-6), 0.0, 1.0)
+    elif finite.any():
         lo, hi = np.percentile(depth_np[finite], [1.0, 99.0])
         if hi <= lo:
             lo, hi = depth_np[finite].min(), depth_np[finite].max()
+        logger.info("Composite (fallback) depth scale lo=%.3f hi=%.3f for %s", float(lo), float(hi), os.path.basename(output_path))
         norm = np.clip((depth_np - lo) / (hi - lo + 1e-6), 0.0, 1.0)
     else:
         norm = np.zeros_like(depth_np)
     try:
         from matplotlib import colormaps
-        turbo = colormaps.get_cmap("turbo")
+        turbo = colormaps["turbo"]
         depth_rgb = (turbo(norm)[:, :, :3] * 255).astype(np.uint8)
     except Exception:
         depth_rgb = (norm * 255).astype(np.uint8)
@@ -183,6 +220,12 @@ def main(args: argparse.Namespace):
             shadow_map = None
             if hasattr(trainer, '_sun_shadow_map_list') and frame_key in trainer._sun_shadow_map_list:
                 shadow_map = trainer._sun_shadow_map_list[frame_key]
+                # Diagnostic: print depth stats
+                depth_min = shadow_map.min().item()
+                depth_max = shadow_map.max().item()
+                depth_mean = shadow_map.mean().item()
+                logger.info("Frame %d shadow depth — min: %.3f, max: %.3f, mean: %.3f, range: %.3f",
+                            frame_idx, depth_min, depth_max, depth_mean, depth_max - depth_min)
             else:
                 logger.warning("No shadow map cached for frame %d (key %d)", frame_idx, frame_key)
                 continue

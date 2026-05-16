@@ -478,14 +478,21 @@ class BasicTrainer(nn.Module):
             sun_distance = max(scene_radius * 5.0, 100.0)
             sun_cam_pos = scene_center - sun_direction * sun_distance
             
-            # Build camera-to-world rotation (camera looks along sun_direction)
-            from utils.camera import look_at_rotation
-            sun_R = look_at_rotation(-sun_direction).cpu().numpy()
-            sun_t = sun_cam_pos.cpu().numpy()
+            # Build OpenCV-style camera-to-world matrix (same convention as cam.camtoworlds)
+            # so that torch.linalg.inv() produces the correct W2C for gsplat.
+            front = torch.nn.functional.normalize(sun_direction, dim=-1)  # z-axis points into scene
+            up = torch.tensor([0., 0., 1.], device=front.device, dtype=front.dtype)
+            if torch.abs(torch.dot(front, up)) > 0.99:
+                up = torch.tensor([0., 1., 0.], device=front.device, dtype=front.dtype)
+            right = torch.nn.functional.normalize(torch.cross(front, up), dim=-1)
+            up = torch.cross(right, front)
+            sun_R_c2w = torch.stack([right, up, front], dim=-1)  # [3, 3]
             
-            from utils.graphics_utils import getWorld2View
-            sun_viewmat_np = getWorld2View(sun_R, sun_t)  # world_to_camera, [4,4]
-            sun_viewmat = torch.from_numpy(sun_viewmat_np).float().to(self.device)
+            sun_c2w = torch.eye(4, device=self.device, dtype=torch.float32)
+            sun_c2w[:3, :3] = sun_R_c2w
+            sun_c2w[:3, 3] = sun_cam_pos
+            
+            sun_viewmat = torch.linalg.inv(sun_c2w)  # W2C, consistent with working render path
             
             # Perspective intrinsics covering the scene at sun_distance
             half_fov = torch.arctan(scene_radius / sun_distance)
@@ -507,7 +514,7 @@ class BasicTrainer(nn.Module):
                 scales=scales,
                 opacities=opacities,
                 colors=dummy_colors,
-                viewmats=torch.linalg.inv(sun_viewmat)[None, ...],
+                viewmats=sun_viewmat[None, ...],
                 Ks=sun_K[None, ...],
                 width=shadow_map_size,
                 height=shadow_map_size,
