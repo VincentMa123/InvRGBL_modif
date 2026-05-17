@@ -48,17 +48,8 @@ RESET_STAGE2_MATERIALS=${RESET_STAGE2_MATERIALS:-1}
 
 STAGE1_FINAL=${RUN_DIR}/checkpoint_final.pth
 STAGE1_CKPT=${RUN_DIR}/checkpoint_${FREEZE_STEP}.pth
-STAGE2_CKPT=${RUN_DIR}/checkpoint_${FREEZE_STEP}_stage2_reset.pth
 REGION_PATH=${DATA_ROOT}/${SCENE_ID}/${REGION_DIR}
 
-if [[ ! -f "${STAGE1_CKPT}" ]]; then
-    if [[ ! -f "${STAGE1_FINAL}" ]]; then
-        echo "Missing stage-1 checkpoint: ${STAGE1_FINAL}" >&2
-        exit 1
-    fi
-    echo "Copying ${STAGE1_FINAL} to ${STAGE1_CKPT}"
-    cp -f "${STAGE1_FINAL}" "${STAGE1_CKPT}"
-fi
 
 COMMON_OPTS=(
     dataset=waymo/1cams
@@ -89,14 +80,6 @@ else
 fi
 
 RESUME_CKPT=${STAGE1_CKPT}
-if [[ "${RESET_STAGE2_MATERIALS}" == "1" ]]; then
-    echo "Resetting roughness in ${STAGE1_CKPT} for a clean stage-2 material start"
-    python -u tools/reset_checkpoint_materials.py \
-        --input "${STAGE1_CKPT}" \
-        --output "${STAGE2_CKPT}" \
-        --roughness 0.7
-    RESUME_CKPT=${STAGE2_CKPT}
-fi
 
 echo "Stage 2: resuming from ${RESUME_CKPT} with cached SAM region maps"
 python -u tools/train.py \
