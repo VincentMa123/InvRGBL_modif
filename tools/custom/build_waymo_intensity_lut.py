@@ -656,7 +656,8 @@ def write_normalized_bins(scan_files: List[Tuple[str, Path]], lut: np.ndarray, e
         
         # Apply Distance Compensation (Reflectance calculation)
         dist = np.linalg.norm(points[top_mask], axis=1)
-        reflectance = normalized * ((dist / 20.0) ** 2)
+        # reflectance = normalized * ((dist / 20.0) ** 2)
+        reflectance = normalized
         
         # Update only Top LiDAR points (set others to 0 or keep as is)
         lidar_info[~top_mask, INTENSITY_INDEX] = 0 

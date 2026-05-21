@@ -14,3 +14,4 @@ image.png
 /bvh/build
 
 pretrained/*.pth
+tools/custom/analyze_intensity_range.py
