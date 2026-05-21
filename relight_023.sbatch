@@ -30,7 +30,7 @@ DATA_ROOT=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training
     --name sunset_box_sunvis_5f \
     --preset sunset \
     --split full \
-    --max_frames 5 \
+    --max_frames 50 \
     --dynamic_box_sun_visibility \
     --dynamic_box_receiver_static_only \
     --dynamic_box_receiver_dynamic_opacity_threshold 0.5 \
