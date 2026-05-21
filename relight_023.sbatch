@@ -37,15 +37,14 @@ python -u tools/relight.py \
     --max_frames 50 \
     --save_images \
     --dynamic_box_sun_visibility \
-    --no-dynamic_box_receiver_static_only \
-    --no-dynamic_box_skip_inside_boxes \
-    --dynamic_box_receiver_dynamic_opacity_threshold 1.1 \
-    --dynamic_box_contact_shadow_dynamic_opacity_threshold 1.1 \
-    --dynamic_box_shadow_strength 1.0 \
-    --dynamic_box_size_scale 1.15,1.15,1.05 \
+    --dynamic_box_skip_inside_boxes \
+    --dynamic_box_receiver_static_only \
+    --dynamic_box_receiver_dynamic_opacity_threshold 0.5 \
+    --dynamic_box_shadow_strength 0.7 \
     --dynamic_box_contact_shadow_strength 1.0 \
     --dynamic_box_contact_shadow_height 1.2 \
     --dynamic_box_contact_shadow_softness 0.7 \
+    --dynamic_box_contact_shadow_dynamic_opacity_threshold 0.8 \
     --env_diffuse_scale 0.5 \
     --env_specular_scale 0.7 \
     --keys rgbs,rendered_pbr,rendered_albedos,rendered_sun_visibility,rendered_dynamic_box_sun_visibility,rendered_dynamic_box_contact_shadow,depths \
