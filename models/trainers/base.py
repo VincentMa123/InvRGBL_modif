@@ -1319,6 +1319,15 @@ class BasicTrainer(nn.Module):
                     **kwargs,
                 )
                 return mask_renders[0], mask_alphas[0].squeeze(-1)
+
+            def dilate_image_mask(mask, radius):
+                if radius <= 0:
+                    return mask
+                mask_2d = mask.squeeze(-1) if mask.ndim == 3 else mask
+                kernel_size = 2 * int(radius) + 1
+                mask_4d = mask_2d.float()[None, None, ...]
+                dilated = F.max_pool2d(mask_4d, kernel_size=kernel_size, stride=1, padding=int(radius))
+                return (dilated[0, 0, ..., None] > 0.5)
             
             if self.pbr:
                 rendered_rgb,rendered_normal,rendered_albedos,rendered_roughness, rendered_metallic, rendered_reflectivity, \
@@ -1404,6 +1413,7 @@ class BasicTrainer(nn.Module):
                     dynamic_box_contact_shadow = None
                     dynamic_box_contact_shadow_raw = None
                     dynamic_box_contact_apply_mask = None
+                    dynamic_box_contact_support_mask = None
                     dynamic_opacity_map = None
                     rendered_pbr_background = None
                     rendered_pbr_dynamic = None
@@ -1428,6 +1438,17 @@ class BasicTrainer(nn.Module):
                                 self.pts_labels != self.gaussian_classes["Background"]
                             ).float()
                             dynamic_opacity_map = rasterize_opacity(dynamic_point_mask).detach()
+                            if dynamic_box_cfg.get("contact_shadow_support_near_dynamic", False):
+                                support_threshold = float(
+                                    dynamic_box_cfg.get("contact_shadow_support_dynamic_opacity_threshold", 0.1)
+                                )
+                                support_radius = int(
+                                    dynamic_box_cfg.get("contact_shadow_support_dilate_pixels", 32)
+                                )
+                                dynamic_box_contact_support_mask = dilate_image_mask(
+                                    dynamic_opacity_map[..., None] > support_threshold,
+                                    support_radius,
+                                )
                         dynamic_box_sun_visibility = self.compute_dynamic_box_sun_visibility(
                             means_map=means_map.detach(),
                             depth_map=rendered_depth.detach(),
@@ -1472,6 +1493,12 @@ class BasicTrainer(nn.Module):
                                 dynamic_opacity_map=contact_dynamic_opacity_map,
                             )
                             dynamic_box_contact_shadow_raw = dynamic_box_contact_shadow
+                            if dynamic_box_contact_support_mask is not None:
+                                dynamic_box_contact_shadow = torch.where(
+                                    dynamic_box_contact_support_mask,
+                                    dynamic_box_contact_shadow,
+                                    torch.ones_like(dynamic_box_contact_shadow),
+                                )
                             if contact_receiver in ("background", "background_only", "static") and dynamic_opacity_map is not None:
                                 apply_threshold = float(
                                     dynamic_box_cfg.get(
@@ -1572,6 +1599,12 @@ class BasicTrainer(nn.Module):
                                 depth_map=bg_depth.detach(),
                                 opacity_map=bg_opacity.detach(),
                                 dynamic_opacity_map=None,
+                            )
+                        if bg_contact_shadow is not None and dynamic_box_contact_support_mask is not None:
+                            bg_contact_shadow = torch.where(
+                                dynamic_box_contact_support_mask,
+                                bg_contact_shadow,
+                                torch.ones_like(bg_contact_shadow),
                             )
                         bg_ao_map = None
                         if envmap_ao_cfg.get("enabled", True):
@@ -1706,6 +1739,10 @@ class BasicTrainer(nn.Module):
                     info.update({
                         'rendered_dynamic_box_contact_apply_mask': dynamic_box_contact_apply_mask,
                     })
+                if 'dynamic_box_contact_support_mask' in locals() and dynamic_box_contact_support_mask is not None:
+                    info.update({
+                        'rendered_dynamic_box_contact_support_mask': dynamic_box_contact_support_mask.to(renders.dtype),
+                    })
                 if 'dynamic_opacity_map' in locals() and dynamic_opacity_map is not None:
                     info.update({
                         'rendered_dynamic_opacity': dynamic_opacity_map[..., None],
@@ -1771,6 +1808,10 @@ class BasicTrainer(nn.Module):
             if 'rendered_dynamic_box_contact_apply_mask' in self.info:
                 results.update({
                     'rendered_dynamic_box_contact_apply_mask': self.info['rendered_dynamic_box_contact_apply_mask'],
+                })
+            if 'rendered_dynamic_box_contact_support_mask' in self.info:
+                results.update({
+                    'rendered_dynamic_box_contact_support_mask': self.info['rendered_dynamic_box_contact_support_mask'],
                 })
             if 'rendered_dynamic_opacity' in self.info:
                 results.update({

@@ -38,6 +38,7 @@ DEFAULT_KEYS = [
     "rendered_dynamic_box_contact_shadow",
     "rendered_dynamic_box_contact_shadow_raw",
     "rendered_dynamic_box_contact_apply_mask",
+    "rendered_dynamic_box_contact_support_mask",
     "rendered_dynamic_opacity",
     "depths",
 ]
@@ -224,6 +225,9 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
         "contact_shadow_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_dynamic_opacity_threshold),
         "contact_shadow_apply_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_apply_dynamic_opacity_threshold),
         "contact_shadow_apply_depth_tolerance": float(args.dynamic_box_contact_shadow_apply_depth_tolerance),
+        "contact_shadow_support_near_dynamic": bool(args.dynamic_box_contact_shadow_support_near_dynamic),
+        "contact_shadow_support_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_support_dynamic_opacity_threshold),
+        "contact_shadow_support_dilate_pixels": int(args.dynamic_box_contact_shadow_support_dilate_pixels),
         "layer_separated_pbr": bool(args.dynamic_box_layer_separated_pbr),
         "layer_dynamic_depth_margin": float(args.dynamic_box_layer_dynamic_depth_margin),
     }
@@ -430,6 +434,9 @@ if __name__ == "__main__":
     parser.add_argument("--dynamic_box_contact_shadow_dynamic_opacity_threshold", type=float, default=0.8, help="ignore contact shadow on pixels with dynamic opacity above this threshold")
     parser.add_argument("--dynamic_box_contact_shadow_apply_dynamic_opacity_threshold", type=float, default=0.8, help="when using the background contact receiver, do not apply the contact term to pixels above this dynamic opacity")
     parser.add_argument("--dynamic_box_contact_shadow_apply_depth_tolerance", type=float, default=0.5, help="when using the background contact receiver, apply contact only where full and background depths agree within this many meters; negative disables this gate")
+    parser.add_argument("--dynamic_box_contact_shadow_support_near_dynamic", action=argparse.BooleanOptionalAction, default=False, help="keep contact shadows only near the image-space dynamic opacity support")
+    parser.add_argument("--dynamic_box_contact_shadow_support_dynamic_opacity_threshold", type=float, default=0.1, help="dynamic opacity threshold used to build the contact-shadow support mask")
+    parser.add_argument("--dynamic_box_contact_shadow_support_dilate_pixels", type=int, default=32, help="pixel dilation radius for the image-space contact-shadow support mask")
     parser.add_argument("--dynamic_box_layer_separated_pbr", action=argparse.BooleanOptionalAction, default=False, help="shade background and dynamic layers separately, apply dynamic box contact only to background, then composite dynamic over background")
     parser.add_argument("--dynamic_box_layer_dynamic_depth_margin", type=float, default=0.25, help="meters a dynamic layer must be in front of the background layer to cover it in layer-separated PBR")
 

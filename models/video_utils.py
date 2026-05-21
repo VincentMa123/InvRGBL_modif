@@ -186,6 +186,7 @@ def render(
     rendered_dynamic_box_contact_shadow = []
     rendered_dynamic_box_contact_shadow_raw = []
     rendered_dynamic_box_contact_apply_mask = []
+    rendered_dynamic_box_contact_support_mask = []
     rendered_dynamic_opacity = []
     # sky
     opacities, sky_masks = [], []
@@ -360,6 +361,11 @@ def render(
                 contact_apply_mask = results["rendered_dynamic_box_contact_apply_mask"]
                 rendered_dynamic_box_contact_apply_mask.append(
                     apply_colormap(get_numpy(contact_apply_mask), cmap_name="gray")
+                )
+            if "rendered_dynamic_box_contact_support_mask" in results:
+                contact_support_mask = results["rendered_dynamic_box_contact_support_mask"]
+                rendered_dynamic_box_contact_support_mask.append(
+                    apply_colormap(get_numpy(contact_support_mask), cmap_name="gray")
                 )
             if "rendered_dynamic_opacity" in results:
                 dynamic_opacity = results["rendered_dynamic_opacity"]
@@ -583,6 +589,8 @@ def render(
         results_dict["rendered_dynamic_box_contact_shadow_raw"] = rendered_dynamic_box_contact_shadow_raw
     if len(rendered_dynamic_box_contact_apply_mask) > 0:
         results_dict["rendered_dynamic_box_contact_apply_mask"] = rendered_dynamic_box_contact_apply_mask
+    if len(rendered_dynamic_box_contact_support_mask) > 0:
+        results_dict["rendered_dynamic_box_contact_support_mask"] = rendered_dynamic_box_contact_support_mask
     if len(rendered_dynamic_opacity) > 0:
         results_dict["rendered_dynamic_opacity"] = rendered_dynamic_opacity
     if len(rendered_normals)>0:

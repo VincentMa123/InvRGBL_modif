@@ -77,6 +77,9 @@ python -u tools/train.py \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_depth_tolerance=0.5 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_support_near_dynamic=true \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_support_dynamic_opacity_threshold=0.08 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_support_dilate_pixels=36 \
     trainer.render.dynamic_box_sun_visibility.layer_separated_pbr=true \
     trainer.render.dynamic_box_sun_visibility.layer_dynamic_depth_margin=0.25 \
     data.pixel_source.load_region_maps=false \
@@ -126,6 +129,9 @@ python -u tools/train.py \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_depth_tolerance=0.5 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_support_near_dynamic=true \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_support_dynamic_opacity_threshold=0.08 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_support_dilate_pixels=36 \
     trainer.render.dynamic_box_sun_visibility.layer_separated_pbr=true \
     trainer.render.dynamic_box_sun_visibility.layer_dynamic_depth_margin=0.25 \
     trainer.losses.intensity.stage2_w=0.2 \

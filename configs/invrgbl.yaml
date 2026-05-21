@@ -49,6 +49,9 @@ trainer:
       contact_shadow_dynamic_opacity_threshold: 0.8
       contact_shadow_apply_dynamic_opacity_threshold: 0.8
       contact_shadow_apply_depth_tolerance: 0.5
+      contact_shadow_support_near_dynamic: false
+      contact_shadow_support_dynamic_opacity_threshold: 0.1
+      contact_shadow_support_dilate_pixels: 32
       layer_separated_pbr: false
       layer_dynamic_depth_margin: 0.25
   losses:
