@@ -34,7 +34,7 @@ python -u tools/relight.py \
     --name sunset_box_contact_debug_5f \
     --preset sunset \
     --split full \
-    --max_frames 5 \
+    --max_frames 50 \
     --save_images \
     --dynamic_box_sun_visibility \
     --no-dynamic_box_receiver_static_only \
