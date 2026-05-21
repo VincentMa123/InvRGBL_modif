@@ -1470,10 +1470,24 @@ class BasicTrainer(nn.Module):
                                         dynamic_box_cfg.get("contact_shadow_dynamic_opacity_threshold", 0.8),
                                     )
                                 )
-                                static_receiver = dynamic_opacity_map[..., None] < apply_threshold
-                                dynamic_box_contact_apply_mask = static_receiver.to(dynamic_box_contact_shadow.dtype)
+                                apply_mask = contact_opacity_map > float(
+                                    dynamic_box_cfg.get("opacity_threshold", 0.01)
+                                )
+                                depth_tolerance = float(
+                                    dynamic_box_cfg.get("contact_shadow_apply_depth_tolerance", 0.5)
+                                )
+                                if depth_tolerance >= 0:
+                                    apply_mask = apply_mask & (
+                                        (rendered_depth.detach() - contact_depth_map).abs()
+                                        < depth_tolerance
+                                    )
+                                if apply_threshold <= 1.0:
+                                    apply_mask = apply_mask & (
+                                        dynamic_opacity_map[..., None] < apply_threshold
+                                    )
+                                dynamic_box_contact_apply_mask = apply_mask.to(dynamic_box_contact_shadow.dtype)
                                 dynamic_box_contact_shadow = torch.where(
-                                    static_receiver,
+                                    apply_mask,
                                     dynamic_box_contact_shadow,
                                     torch.ones_like(dynamic_box_contact_shadow),
                                 )

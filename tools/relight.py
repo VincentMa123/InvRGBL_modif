@@ -219,6 +219,7 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
         "contact_shadow_softness": float(args.dynamic_box_contact_shadow_softness),
         "contact_shadow_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_dynamic_opacity_threshold),
         "contact_shadow_apply_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_apply_dynamic_opacity_threshold),
+        "contact_shadow_apply_depth_tolerance": float(args.dynamic_box_contact_shadow_apply_depth_tolerance),
     }
 
 
@@ -422,6 +423,7 @@ if __name__ == "__main__":
     parser.add_argument("--dynamic_box_contact_shadow_softness", type=float, default=0.35, help="horizontal softness in meters outside the dynamic OBB footprint")
     parser.add_argument("--dynamic_box_contact_shadow_dynamic_opacity_threshold", type=float, default=0.8, help="ignore contact shadow on pixels with dynamic opacity above this threshold")
     parser.add_argument("--dynamic_box_contact_shadow_apply_dynamic_opacity_threshold", type=float, default=0.8, help="when using the background contact receiver, do not apply the contact term to pixels above this dynamic opacity")
+    parser.add_argument("--dynamic_box_contact_shadow_apply_depth_tolerance", type=float, default=0.5, help="when using the background contact receiver, apply contact only where full and background depths agree within this many meters; negative disables this gate")
 
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="OmegaConf overrides")
     parsed_args = parser.parse_args()

@@ -48,6 +48,7 @@ trainer:
       contact_shadow_softness: 0.35
       contact_shadow_dynamic_opacity_threshold: 0.8
       contact_shadow_apply_dynamic_opacity_threshold: 0.8
+      contact_shadow_apply_depth_tolerance: 0.5
   losses:
     rgb:
       w: 0.8

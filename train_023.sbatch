@@ -111,6 +111,7 @@ python -u tools/train.py \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_softness=0.55 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_dynamic_opacity_threshold=0.8 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_depth_tolerance=0.5 \
     trainer.losses.intensity.stage2_w=0.2 \
     trainer.losses.ref_neighborhood_smoothness.w=0.05 \
     trainer.losses.ref_region_consistency_albedo.w=0.05
