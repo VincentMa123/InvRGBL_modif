@@ -180,6 +180,9 @@ def render(
     rendered_sun_visibility = []
     rendered_dynamic_box_sun_visibility = []
     rendered_dynamic_box_contact_shadow = []
+    rendered_dynamic_box_contact_shadow_raw = []
+    rendered_dynamic_box_contact_apply_mask = []
+    rendered_dynamic_opacity = []
     # sky
     opacities, sky_masks = [], []
     Background_opacities, RigidNodes_opacities, DeformableNodes_opacities, SMPLNodes_opacities, Dynamic_opacities = [], [], [], [], []
@@ -343,6 +346,21 @@ def render(
                 contact_shadow = results["rendered_dynamic_box_contact_shadow"]
                 rendered_dynamic_box_contact_shadow.append(
                     apply_colormap(get_numpy(contact_shadow), cmap_name="gray")
+                )
+            if "rendered_dynamic_box_contact_shadow_raw" in results:
+                contact_shadow_raw = results["rendered_dynamic_box_contact_shadow_raw"]
+                rendered_dynamic_box_contact_shadow_raw.append(
+                    apply_colormap(get_numpy(contact_shadow_raw), cmap_name="gray")
+                )
+            if "rendered_dynamic_box_contact_apply_mask" in results:
+                contact_apply_mask = results["rendered_dynamic_box_contact_apply_mask"]
+                rendered_dynamic_box_contact_apply_mask.append(
+                    apply_colormap(get_numpy(contact_apply_mask), cmap_name="gray")
+                )
+            if "rendered_dynamic_opacity" in results:
+                dynamic_opacity = results["rendered_dynamic_opacity"]
+                rendered_dynamic_opacity.append(
+                    apply_colormap(get_numpy(dynamic_opacity), cmap_name="gray")
                 )
 
             if "rendered_pbr" in results:
@@ -543,6 +561,12 @@ def render(
         results_dict["rendered_dynamic_box_sun_visibility"] = rendered_dynamic_box_sun_visibility
     if len(rendered_dynamic_box_contact_shadow) > 0:
         results_dict["rendered_dynamic_box_contact_shadow"] = rendered_dynamic_box_contact_shadow
+    if len(rendered_dynamic_box_contact_shadow_raw) > 0:
+        results_dict["rendered_dynamic_box_contact_shadow_raw"] = rendered_dynamic_box_contact_shadow_raw
+    if len(rendered_dynamic_box_contact_apply_mask) > 0:
+        results_dict["rendered_dynamic_box_contact_apply_mask"] = rendered_dynamic_box_contact_apply_mask
+    if len(rendered_dynamic_opacity) > 0:
+        results_dict["rendered_dynamic_opacity"] = rendered_dynamic_opacity
     if len(rendered_normals)>0:
         results_dict["rendered_normal"] = rendered_normals
     if len(pbrs)>0:

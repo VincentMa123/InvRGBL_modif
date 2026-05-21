@@ -1402,6 +1402,8 @@ class BasicTrainer(nn.Module):
                     pbr_reflectivity = rendered_reflectivity
                     dynamic_box_sun_visibility = None
                     dynamic_box_contact_shadow = None
+                    dynamic_box_contact_shadow_raw = None
+                    dynamic_box_contact_apply_mask = None
                     dynamic_opacity_map = None
 
                     dynamic_box_cfg = self.render_cfg.get("dynamic_box_sun_visibility", {})
@@ -1460,6 +1462,7 @@ class BasicTrainer(nn.Module):
                                 opacity_map=contact_opacity_map,
                                 dynamic_opacity_map=contact_dynamic_opacity_map,
                             )
+                            dynamic_box_contact_shadow_raw = dynamic_box_contact_shadow
                             if contact_receiver in ("background", "background_only", "static") and dynamic_opacity_map is not None:
                                 apply_threshold = float(
                                     dynamic_box_cfg.get(
@@ -1468,6 +1471,7 @@ class BasicTrainer(nn.Module):
                                     )
                                 )
                                 static_receiver = dynamic_opacity_map[..., None] < apply_threshold
+                                dynamic_box_contact_apply_mask = static_receiver.to(dynamic_box_contact_shadow.dtype)
                                 dynamic_box_contact_shadow = torch.where(
                                     static_receiver,
                                     dynamic_box_contact_shadow,
@@ -1531,6 +1535,18 @@ class BasicTrainer(nn.Module):
                     info.update({
                         'rendered_dynamic_box_contact_shadow': dynamic_box_contact_shadow,
                     })
+                if 'dynamic_box_contact_shadow_raw' in locals() and dynamic_box_contact_shadow_raw is not None:
+                    info.update({
+                        'rendered_dynamic_box_contact_shadow_raw': dynamic_box_contact_shadow_raw,
+                    })
+                if 'dynamic_box_contact_apply_mask' in locals() and dynamic_box_contact_apply_mask is not None:
+                    info.update({
+                        'rendered_dynamic_box_contact_apply_mask': dynamic_box_contact_apply_mask,
+                    })
+                if 'dynamic_opacity_map' in locals() and dynamic_opacity_map is not None:
+                    info.update({
+                        'rendered_dynamic_opacity': dynamic_opacity_map[..., None],
+                    })
 
             else:
                 assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
@@ -1568,6 +1584,18 @@ class BasicTrainer(nn.Module):
             if 'rendered_dynamic_box_contact_shadow' in self.info:
                 results.update({
                     'rendered_dynamic_box_contact_shadow': self.info['rendered_dynamic_box_contact_shadow'],
+                })
+            if 'rendered_dynamic_box_contact_shadow_raw' in self.info:
+                results.update({
+                    'rendered_dynamic_box_contact_shadow_raw': self.info['rendered_dynamic_box_contact_shadow_raw'],
+                })
+            if 'rendered_dynamic_box_contact_apply_mask' in self.info:
+                results.update({
+                    'rendered_dynamic_box_contact_apply_mask': self.info['rendered_dynamic_box_contact_apply_mask'],
+                })
+            if 'rendered_dynamic_opacity' in self.info:
+                results.update({
+                    'rendered_dynamic_opacity': self.info['rendered_dynamic_opacity'],
                 })
         
         if self.training:

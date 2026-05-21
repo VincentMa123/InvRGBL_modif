@@ -32,6 +32,9 @@ DEFAULT_KEYS = [
     "rendered_sun_visibility",
     "rendered_dynamic_box_sun_visibility",
     "rendered_dynamic_box_contact_shadow",
+    "rendered_dynamic_box_contact_shadow_raw",
+    "rendered_dynamic_box_contact_apply_mask",
+    "rendered_dynamic_opacity",
     "depths",
 ]
 
