@@ -1405,15 +1405,23 @@ class BasicTrainer(nn.Module):
                     dynamic_box_contact_shadow_raw = None
                     dynamic_box_contact_apply_mask = None
                     dynamic_opacity_map = None
+                    rendered_pbr_background = None
+                    rendered_pbr_dynamic = None
+                    rendered_pbr_layered = None
+                    rendered_pbr_dynamic_composite_mask = None
+                    background_renders = None
+                    background_alphas = None
+                    background_depth = None
 
                     dynamic_box_cfg = self.render_cfg.get("dynamic_box_sun_visibility", {})
                     if dynamic_box_cfg is None:
                         dynamic_box_cfg = {}
+                    contact_shadow_strength = float(dynamic_box_cfg.get("contact_shadow_strength", 0.0))
                     if dynamic_box_cfg.get("enabled", False):
-                        contact_shadow_strength = float(dynamic_box_cfg.get("contact_shadow_strength", 0.0))
                         need_dynamic_opacity_map = (
                             dynamic_box_cfg.get("receiver_static_only", True)
                             or contact_shadow_strength > 0
+                            or dynamic_box_cfg.get("layer_separated_pbr", False)
                         )
                         if need_dynamic_opacity_map:
                             dynamic_point_mask = (
@@ -1440,7 +1448,8 @@ class BasicTrainer(nn.Module):
                                 background_point_mask = (
                                     self.pts_labels == self.gaussian_classes["Background"]
                                 ).float()
-                                background_renders, background_alphas = rasterize_masked_render(background_point_mask)
+                                if background_renders is None or background_alphas is None:
+                                    background_renders, background_alphas = rasterize_masked_render(background_point_mask)
                                 background_depth = background_renders[..., -1:]
                                 background_means_map = (
                                     cam.camtoworlds[:3, 3].view(1, 1, 3)
@@ -1523,8 +1532,148 @@ class BasicTrainer(nn.Module):
                     )
                     pbr_rgb = pbr_rgb * alphas[..., None]
 
+                    if dynamic_box_cfg.get("enabled", False) and dynamic_box_cfg.get("layer_separated_pbr", False):
+                        background_point_mask = (
+                            self.pts_labels == self.gaussian_classes["Background"]
+                        ).float()
+                        dynamic_point_mask = (
+                            self.pts_labels != self.gaussian_classes["Background"]
+                        ).float()
+                        if background_renders is None or background_alphas is None:
+                            background_renders, background_alphas = rasterize_masked_render(background_point_mask)
+                        dynamic_renders, dynamic_alphas = rasterize_masked_render(dynamic_point_mask)
+
+                        bg_rgb, bg_normal, bg_albedo, bg_roughness, bg_metallic, bg_reflectivity, \
+                        bg_sun_visibility, bg_intensity, bg_legacy_pbr, bg_diffuse, bg_incident_sun, bg_depth = \
+                         torch.split(background_renders, [3,3,3,1,1,1,1,1,3,3,3,1], dim=-1)
+                        dyn_rgb, dyn_normal, dyn_albedo, dyn_roughness, dyn_metallic, dyn_reflectivity, \
+                        dyn_sun_visibility, dyn_intensity, dyn_legacy_pbr, dyn_diffuse, dyn_incident_sun, dyn_depth = \
+                         torch.split(dynamic_renders, [3,3,3,1,1,1,1,1,3,3,3,1], dim=-1)
+
+                        bg_opacity = background_alphas[..., None]
+                        dyn_opacity = dynamic_alphas[..., None]
+                        bg_means_map = cam.camtoworlds[:3, 3].view(1, 1, 3) + rays_world * bg_depth
+                        dyn_means_map = cam.camtoworlds[:3, 3].view(1, 1, 3) + rays_world * dyn_depth
+
+                        bg_sunvis = bg_sun_visibility
+                        bg_box_sun_visibility = self.compute_dynamic_box_sun_visibility(
+                            means_map=bg_means_map.detach(),
+                            depth_map=bg_depth.detach(),
+                            opacity_map=bg_opacity.detach(),
+                            sun_direction=sun_dir.detach(),
+                            dynamic_opacity_map=None,
+                        )
+                        bg_sunvis = (bg_sunvis * bg_box_sun_visibility).clamp(0.0, 1.0)
+
+                        bg_contact_shadow = dynamic_box_contact_shadow_raw
+                        if bg_contact_shadow is None and contact_shadow_strength > 0:
+                            bg_contact_shadow = self.compute_dynamic_box_contact_shadow(
+                                means_map=bg_means_map.detach(),
+                                depth_map=bg_depth.detach(),
+                                opacity_map=bg_opacity.detach(),
+                                dynamic_opacity_map=None,
+                            )
+                        bg_ao_map = None
+                        if envmap_ao_cfg.get("enabled", True):
+                            bg_ao_map = compute_screen_space_ao(
+                                depth_map=bg_depth.detach(),
+                                normal_map=bg_normal.detach(),
+                                opacity_map=bg_opacity.detach(),
+                                radius=int(envmap_ao_cfg.get("radius", 5)),
+                                strength=float(envmap_ao_cfg.get("strength", 0.35)),
+                                depth_bias=float(envmap_ao_cfg.get("depth_bias", 0.02)),
+                            )
+                        if bg_contact_shadow is not None:
+                            bg_sunvis = (bg_sunvis * bg_contact_shadow).clamp(0.0, 1.0)
+                            bg_ao_map = (
+                                bg_contact_shadow
+                                if bg_ao_map is None
+                                else (bg_ao_map * bg_contact_shadow).clamp(0.0, 1.0)
+                            )
+
+                        bg_metallic_pbr = (
+                            torch.zeros_like(bg_metallic)
+                            if (not self.training and getattr(self, "relight_force_dielectric", False))
+                            else bg_metallic
+                        )
+                        dyn_metallic_pbr = (
+                            torch.zeros_like(dyn_metallic)
+                            if (not self.training and getattr(self, "relight_force_dielectric", False))
+                            else dyn_metallic
+                        )
+                        bg_pbr_shaded = image_space_pbr(
+                            albedo_map=bg_albedo,
+                            normal_map=bg_normal,
+                            roughness_map=bg_roughness,
+                            metallic_map=bg_metallic_pbr,
+                            sunvis_map=bg_sunvis,
+                            viewdir_map=viewdirs_img,
+                            env_map=env_map,
+                            sun_dir=sun_dir,
+                            sun_intensity=sun_intensity,
+                            spotlights=self.spotlights if not self.training else None,
+                            depth_map=bg_depth,
+                            means_map=bg_means_map,
+                            min_roughness=train_min_roughness,
+                            reflectivity_map=bg_reflectivity,
+                            ao_map=bg_ao_map,
+                            specular_ao_strength=specular_ao_strength,
+                            env_diffuse_scale=float(self.render_cfg.get("env_diffuse_scale", 1.0)),
+                            env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
+                            env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
+                            env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
+                        )
+                        dyn_pbr_shaded = image_space_pbr(
+                            albedo_map=dyn_albedo,
+                            normal_map=dyn_normal,
+                            roughness_map=dyn_roughness,
+                            metallic_map=dyn_metallic_pbr,
+                            sunvis_map=dyn_sun_visibility,
+                            viewdir_map=viewdirs_img,
+                            env_map=env_map,
+                            sun_dir=sun_dir,
+                            sun_intensity=sun_intensity,
+                            spotlights=self.spotlights if not self.training else None,
+                            depth_map=dyn_depth,
+                            means_map=dyn_means_map,
+                            min_roughness=train_min_roughness,
+                            reflectivity_map=dyn_reflectivity,
+                            ao_map=None,
+                            specular_ao_strength=specular_ao_strength,
+                            env_diffuse_scale=float(self.render_cfg.get("env_diffuse_scale", 1.0)),
+                            env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
+                            env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
+                            env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
+                        )
+
+                        dynamic_depth_margin = float(dynamic_box_cfg.get("layer_dynamic_depth_margin", 0.25))
+                        dynamic_foreground = (
+                            (dyn_opacity > float(dynamic_box_cfg.get("opacity_threshold", 0.01)))
+                            & (dyn_depth > 0)
+                            & ((bg_depth <= 0) | ((bg_depth - dyn_depth) > dynamic_depth_margin))
+                        )
+                        dyn_composite_alpha = torch.where(
+                            dynamic_foreground,
+                            dyn_opacity.clamp(0.0, 1.0),
+                            torch.zeros_like(dyn_opacity),
+                        )
+                        bg_pbr = bg_pbr_shaded * bg_opacity.clamp(0.0, 1.0)
+                        dyn_pbr = dyn_pbr_shaded * dyn_composite_alpha
+                        pbr_rgb = dyn_pbr + bg_pbr * (1.0 - dyn_composite_alpha)
+                        rendered_pbr_background = bg_pbr
+                        rendered_pbr_dynamic = dyn_pbr
+                        rendered_pbr_layered = pbr_rgb
+                        rendered_pbr_dynamic_composite_mask = dyn_composite_alpha
+
                     if (not self.training) and self.render_cfg.get("eval_exposure_scale", 1.0) != 1.0:
-                        pbr_rgb = pbr_rgb * float(self.render_cfg.get("eval_exposure_scale", 1.0))
+                        exposure_scale = float(self.render_cfg.get("eval_exposure_scale", 1.0))
+                        pbr_rgb = pbr_rgb * exposure_scale
+                        if rendered_pbr_layered is not None:
+                            rendered_pbr_layered = rendered_pbr_layered * exposure_scale
+                        if rendered_pbr_background is not None:
+                            rendered_pbr_background = rendered_pbr_background * exposure_scale
+                        if rendered_pbr_dynamic is not None:
+                            rendered_pbr_dynamic = rendered_pbr_dynamic * exposure_scale
 
                     rendered_pbr = pbr_rgb
                     if (not self.training) and self.render_cfg.get("eval_use_pbr_rgb", False):
@@ -1560,6 +1709,22 @@ class BasicTrainer(nn.Module):
                 if 'dynamic_opacity_map' in locals() and dynamic_opacity_map is not None:
                     info.update({
                         'rendered_dynamic_opacity': dynamic_opacity_map[..., None],
+                    })
+                if 'rendered_pbr_layered' in locals() and rendered_pbr_layered is not None:
+                    info.update({
+                        'rendered_pbr_layered': rendered_pbr_layered,
+                    })
+                if 'rendered_pbr_background' in locals() and rendered_pbr_background is not None:
+                    info.update({
+                        'rendered_pbr_background': rendered_pbr_background,
+                    })
+                if 'rendered_pbr_dynamic' in locals() and rendered_pbr_dynamic is not None:
+                    info.update({
+                        'rendered_pbr_dynamic': rendered_pbr_dynamic,
+                    })
+                if 'rendered_pbr_dynamic_composite_mask' in locals() and rendered_pbr_dynamic_composite_mask is not None:
+                    info.update({
+                        'rendered_pbr_dynamic_composite_mask': rendered_pbr_dynamic_composite_mask,
                     })
 
             else:
@@ -1610,6 +1775,22 @@ class BasicTrainer(nn.Module):
             if 'rendered_dynamic_opacity' in self.info:
                 results.update({
                     'rendered_dynamic_opacity': self.info['rendered_dynamic_opacity'],
+                })
+            if 'rendered_pbr_layered' in self.info:
+                results.update({
+                    'rendered_pbr_layered': self.info['rendered_pbr_layered'],
+                })
+            if 'rendered_pbr_background' in self.info:
+                results.update({
+                    'rendered_pbr_background': self.info['rendered_pbr_background'],
+                })
+            if 'rendered_pbr_dynamic' in self.info:
+                results.update({
+                    'rendered_pbr_dynamic': self.info['rendered_pbr_dynamic'],
+                })
+            if 'rendered_pbr_dynamic_composite_mask' in self.info:
+                results.update({
+                    'rendered_pbr_dynamic_composite_mask': self.info['rendered_pbr_dynamic_composite_mask'],
                 })
         
         if self.training:

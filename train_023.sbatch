@@ -65,6 +65,20 @@ python -u tools/train.py \
     --run_name ${RUN_NAME} \
     "${COMMON_OPTS[@]}" \
     trainer.optim.num_iters=${FREEZE_STEP} \
+    trainer.render.dynamic_box_sun_visibility.enabled=true \
+    trainer.render.dynamic_box_sun_visibility.receiver_static_only=true \
+    trainer.render.dynamic_box_sun_visibility.receiver_dynamic_opacity_threshold=0.5 \
+    trainer.render.dynamic_box_sun_visibility.skip_inside_boxes=true \
+    trainer.render.dynamic_box_sun_visibility.shadow_strength=0.7 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_strength=0.5 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_receiver=background \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_height=0.8 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_softness=0.7 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_dynamic_opacity_threshold=0.8 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_dynamic_opacity_threshold=0.8 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_depth_tolerance=0.5 \
+    trainer.render.dynamic_box_sun_visibility.layer_separated_pbr=true \
+    trainer.render.dynamic_box_sun_visibility.layer_dynamic_depth_margin=0.25 \
     data.pixel_source.load_region_maps=false \
     trainer.losses.ref_region_consistency_albedo.w=0.0 \
     trainer.losses.intensity.stage1_w=0.3
@@ -112,6 +126,8 @@ python -u tools/train.py \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_dynamic_opacity_threshold=0.8 \
     trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_depth_tolerance=0.5 \
+    trainer.render.dynamic_box_sun_visibility.layer_separated_pbr=true \
+    trainer.render.dynamic_box_sun_visibility.layer_dynamic_depth_margin=0.25 \
     trainer.losses.intensity.stage2_w=0.2 \
     trainer.losses.ref_neighborhood_smoothness.w=0.05 \
     trainer.losses.ref_region_consistency_albedo.w=0.05

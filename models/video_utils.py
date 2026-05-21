@@ -173,6 +173,10 @@ def render(
     albedos = []
     rendered_normals = []
     pbrs = []
+    pbrs_layered = []
+    pbrs_background = []
+    pbrs_dynamic = []
+    rendered_pbr_dynamic_composite_mask = []
     rendered_roughness =[]
     rendered_metallic = []
     rendered_reflectivity= []
@@ -366,6 +370,20 @@ def render(
             if "rendered_pbr" in results:
                 pbr = results["rendered_pbr"]
                 pbrs.append(get_numpy(pbr))      
+            if "rendered_pbr_layered" in results:
+                pbr_layered = results["rendered_pbr_layered"]
+                pbrs_layered.append(get_numpy(pbr_layered))
+            if "rendered_pbr_background" in results:
+                pbr_background = results["rendered_pbr_background"]
+                pbrs_background.append(get_numpy(pbr_background))
+            if "rendered_pbr_dynamic" in results:
+                pbr_dynamic = results["rendered_pbr_dynamic"]
+                pbrs_dynamic.append(get_numpy(pbr_dynamic))
+            if "rendered_pbr_dynamic_composite_mask" in results:
+                dynamic_composite_mask = results["rendered_pbr_dynamic_composite_mask"]
+                rendered_pbr_dynamic_composite_mask.append(
+                    apply_colormap(get_numpy(dynamic_composite_mask), cmap_name="gray")
+                )
             
             if "intensity_images" in image_infos:
                 gt_intensity = image_infos["intensity_images"]
@@ -571,6 +589,14 @@ def render(
         results_dict["rendered_normal"] = rendered_normals
     if len(pbrs)>0:
         results_dict["rendered_pbr"] = pbrs
+    if len(pbrs_layered)>0:
+        results_dict["rendered_pbr_layered"] = pbrs_layered
+    if len(pbrs_background)>0:
+        results_dict["rendered_pbr_background"] = pbrs_background
+    if len(pbrs_dynamic)>0:
+        results_dict["rendered_pbr_dynamic"] = pbrs_dynamic
+    if len(rendered_pbr_dynamic_composite_mask)>0:
+        results_dict["rendered_pbr_dynamic_composite_mask"] = rendered_pbr_dynamic_composite_mask
     results_dict["cam_names"] = cam_names
     results_dict["cam_ids"] = cam_ids
     if len(opacities) > 0:

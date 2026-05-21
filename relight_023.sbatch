@@ -48,9 +48,11 @@ python -u tools/relight.py \
     --dynamic_box_contact_shadow_dynamic_opacity_threshold 0.8 \
     --dynamic_box_contact_shadow_apply_dynamic_opacity_threshold 1.1 \
     --dynamic_box_contact_shadow_apply_depth_tolerance 0.5 \
+    --dynamic_box_layer_separated_pbr \
+    --dynamic_box_layer_dynamic_depth_margin 0.25 \
     --env_diffuse_scale 0.75 \
     --env_specular_scale 0.8 \
-    --keys rgbs,rendered_pbr,rendered_albedos,rendered_sun_visibility,rendered_dynamic_box_sun_visibility,rendered_dynamic_box_contact_shadow,rendered_dynamic_box_contact_shadow_raw,rendered_dynamic_box_contact_apply_mask,rendered_dynamic_opacity,depths \
+    --keys rgbs,rendered_pbr,rendered_pbr_layered,rendered_pbr_background,rendered_pbr_dynamic,rendered_pbr_dynamic_composite_mask,rendered_albedos,rendered_sun_visibility,rendered_dynamic_box_sun_visibility,rendered_dynamic_box_contact_shadow,rendered_dynamic_box_contact_shadow_raw,rendered_dynamic_box_contact_apply_mask,rendered_dynamic_opacity,depths \
     data.data_root="${DATA_ROOT}" \
     data.scene_idx=23 \
     data.start_timestep=0 \
