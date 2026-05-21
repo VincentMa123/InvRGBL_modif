@@ -43,9 +43,11 @@ trainer:
       skip_inside_boxes: true
       inside_margin: 0.02
       contact_shadow_strength: 0.0
+      contact_shadow_receiver: full
       contact_shadow_height: 0.75
       contact_shadow_softness: 0.35
       contact_shadow_dynamic_opacity_threshold: 0.8
+      contact_shadow_apply_dynamic_opacity_threshold: 0.8
   losses:
     rgb:
       w: 0.8

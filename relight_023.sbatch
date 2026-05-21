@@ -27,8 +27,8 @@ DATA_ROOT=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training
 
 # Dynamic OBB/contact-shadow debug:
 # - save_images writes per-frame PNGs for the individual mask channels
-# - contact threshold 1.1 disables dynamic-opacity rejection for receiver pixels
-# - strong/soft contact settings make footprint failures easy to diagnose
+# - background contact receiver traces the OBB footprint on the static road map
+# - contact apply threshold keeps that footprint from darkening the car surface
 python -u tools/relight.py \
     --resume_from "${CHECKPOINT}" \
     --name sunset_box_contact_debug_5f \
@@ -42,9 +42,11 @@ python -u tools/relight.py \
     --dynamic_box_receiver_dynamic_opacity_threshold 0.5 \
     --dynamic_box_shadow_strength 0.7 \
     --dynamic_box_contact_shadow_strength 1.0 \
+    --dynamic_box_contact_shadow_receiver background \
     --dynamic_box_contact_shadow_height 1.2 \
     --dynamic_box_contact_shadow_softness 0.7 \
     --dynamic_box_contact_shadow_dynamic_opacity_threshold 0.8 \
+    --dynamic_box_contact_shadow_apply_dynamic_opacity_threshold 0.8 \
     --env_diffuse_scale 0.5 \
     --env_specular_scale 0.7 \
     --keys rgbs,rendered_pbr,rendered_albedos,rendered_sun_visibility,rendered_dynamic_box_sun_visibility,rendered_dynamic_box_contact_shadow,depths \

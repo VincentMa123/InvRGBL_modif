@@ -1300,6 +1300,25 @@ class BasicTrainer(nn.Module):
                     **kwargs,
                 )
                 return mask_alphas[0].squeeze(-1)
+
+            def rasterize_masked_render(point_mask):
+                mask_renders, mask_alphas, _ = rasterization(
+                    means=gs.means,
+                    quats=gs.quats,
+                    scales=gs.scales,
+                    opacities=gs.opacities.squeeze() * point_mask.to(gs.opacities.device),
+                    colors=color_feature,
+                    viewmats=torch.linalg.inv(cam.camtoworlds)[None, ...],
+                    Ks=cam.Ks[None, ...],
+                    width=cam.W,
+                    height=cam.H,
+                    packed=self.render_cfg.packed,
+                    absgrad=False,
+                    sparse_grad=False,
+                    rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
+                    **kwargs,
+                )
+                return mask_renders[0], mask_alphas[0].squeeze(-1)
             
             if self.pbr:
                 rendered_rgb,rendered_normal,rendered_albedos,rendered_roughness, rendered_metallic, rendered_reflectivity, \
@@ -1409,12 +1428,51 @@ class BasicTrainer(nn.Module):
                         pbr_sun_visibility = (pbr_sun_visibility * dynamic_box_sun_visibility).clamp(0.0, 1.0)
                         rendered_sun_visibility = pbr_sun_visibility
                         if contact_shadow_strength > 0:
+                            contact_receiver = str(dynamic_box_cfg.get("contact_shadow_receiver", "full")).lower()
+                            contact_means_map = means_map.detach()
+                            contact_depth_map = rendered_depth.detach()
+                            contact_opacity_map = alphas[..., None].detach()
+                            contact_dynamic_opacity_map = dynamic_opacity_map
+
+                            if contact_receiver in ("background", "background_only", "static"):
+                                background_point_mask = (
+                                    self.pts_labels == self.gaussian_classes["Background"]
+                                ).float()
+                                background_renders, background_alphas = rasterize_masked_render(background_point_mask)
+                                background_depth = background_renders[..., -1:]
+                                background_means_map = (
+                                    cam.camtoworlds[:3, 3].view(1, 1, 3)
+                                    + rays_world * background_depth
+                                )
+                                contact_means_map = background_means_map.detach()
+                                contact_depth_map = background_depth.detach()
+                                contact_opacity_map = background_alphas[..., None].detach()
+                                contact_dynamic_opacity_map = None
+                            elif contact_receiver not in ("full", "visible"):
+                                raise ValueError(
+                                    "dynamic_box_sun_visibility.contact_shadow_receiver "
+                                    f"must be 'full' or 'background', got {contact_receiver!r}"
+                                )
+
                             dynamic_box_contact_shadow = self.compute_dynamic_box_contact_shadow(
-                                means_map=means_map.detach(),
-                                depth_map=rendered_depth.detach(),
-                                opacity_map=alphas[..., None].detach(),
-                                dynamic_opacity_map=dynamic_opacity_map,
+                                means_map=contact_means_map,
+                                depth_map=contact_depth_map,
+                                opacity_map=contact_opacity_map,
+                                dynamic_opacity_map=contact_dynamic_opacity_map,
                             )
+                            if contact_receiver in ("background", "background_only", "static") and dynamic_opacity_map is not None:
+                                apply_threshold = float(
+                                    dynamic_box_cfg.get(
+                                        "contact_shadow_apply_dynamic_opacity_threshold",
+                                        dynamic_box_cfg.get("contact_shadow_dynamic_opacity_threshold", 0.8),
+                                    )
+                                )
+                                static_receiver = dynamic_opacity_map[..., None] < apply_threshold
+                                dynamic_box_contact_shadow = torch.where(
+                                    static_receiver,
+                                    dynamic_box_contact_shadow,
+                                    torch.ones_like(dynamic_box_contact_shadow),
+                                )
                             pbr_sun_visibility = (pbr_sun_visibility * dynamic_box_contact_shadow).clamp(0.0, 1.0)
                             rendered_sun_visibility = pbr_sun_visibility
                             ao_map = (

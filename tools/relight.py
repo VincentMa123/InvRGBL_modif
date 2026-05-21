@@ -211,9 +211,11 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
         "skip_inside_boxes": bool(args.dynamic_box_skip_inside_boxes),
         "inside_margin": float(args.dynamic_box_inside_margin),
         "contact_shadow_strength": float(args.dynamic_box_contact_shadow_strength),
+        "contact_shadow_receiver": args.dynamic_box_contact_shadow_receiver,
         "contact_shadow_height": float(args.dynamic_box_contact_shadow_height),
         "contact_shadow_softness": float(args.dynamic_box_contact_shadow_softness),
         "contact_shadow_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_dynamic_opacity_threshold),
+        "contact_shadow_apply_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_apply_dynamic_opacity_threshold),
     }
 
 
@@ -412,9 +414,11 @@ if __name__ == "__main__":
     parser.add_argument("--dynamic_box_skip_inside_boxes", action=argparse.BooleanOptionalAction, default=True, help="avoid self-shadowing pixels inside an object box")
     parser.add_argument("--dynamic_box_inside_margin", type=float, default=0.02, help="meters subtracted from boxes for inside/self-shadow detection")
     parser.add_argument("--dynamic_box_contact_shadow_strength", type=float, default=0.0, help="soft under-object contact shadow strength applied to sun and environment lighting")
+    parser.add_argument("--dynamic_box_contact_shadow_receiver", choices=["full", "background"], default="full", help="surface used to evaluate contact shadows; background uses a background-only receiver depth pass")
     parser.add_argument("--dynamic_box_contact_shadow_height", type=float, default=0.75, help="vertical distance in meters over which dynamic OBB contact shadow fades from the box bottom")
     parser.add_argument("--dynamic_box_contact_shadow_softness", type=float, default=0.35, help="horizontal softness in meters outside the dynamic OBB footprint")
     parser.add_argument("--dynamic_box_contact_shadow_dynamic_opacity_threshold", type=float, default=0.8, help="ignore contact shadow on pixels with dynamic opacity above this threshold")
+    parser.add_argument("--dynamic_box_contact_shadow_apply_dynamic_opacity_threshold", type=float, default=0.8, help="when using the background contact receiver, do not apply the contact term to pixels above this dynamic opacity")
 
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="OmegaConf overrides")
     parsed_args = parser.parse_args()
