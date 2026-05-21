@@ -12,7 +12,7 @@
 #SBATCH -o work_dirs/%x.%j.out
 #SBATCH -e work_dirs/%x.%j.err
 
-cd /lab/haoq_lab/cse12310504/InvRGBL
+cd ~/project2/InvRGBL_modif
 mkdir -p logs work_dirs
 
 source ~/.bashrc
@@ -35,7 +35,7 @@ START_TIMESTEP=0
 END_TIMESTEP=50
 FREEZE_STEP=15000
 FINAL_STEP=30000
-REGION_DIR=region_sam_reflectivity
+REGION_DIR=region_sam_reflectivity_bgcontact
 
 # Override at submit time if your SAM checkpoint lives elsewhere:
 # sbatch --export=ALL,SAM_CHECKPOINT=/path/to/sam_vit_h_4b8939.pth train_023.sbatch
@@ -101,6 +101,16 @@ python -u tools/train.py \
     data.pixel_source.load_region_maps=true \
     data.pixel_source.region_map_dir=${REGION_DIR} \
     trainer.render.dynamic_box_sun_visibility.enabled=true \
+    trainer.render.dynamic_box_sun_visibility.receiver_static_only=true \
+    trainer.render.dynamic_box_sun_visibility.receiver_dynamic_opacity_threshold=0.5 \
+    trainer.render.dynamic_box_sun_visibility.skip_inside_boxes=true \
+    trainer.render.dynamic_box_sun_visibility.shadow_strength=0.7 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_strength=0.7 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_receiver=background \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_height=1.0 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_softness=0.55 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_dynamic_opacity_threshold=0.8 \
+    trainer.render.dynamic_box_sun_visibility.contact_shadow_apply_dynamic_opacity_threshold=0.8 \
     trainer.losses.intensity.stage2_w=0.2 \
     trainer.losses.ref_neighborhood_smoothness.w=0.05 \
     trainer.losses.ref_region_consistency_albedo.w=0.05
