@@ -30,6 +30,8 @@ DEFAULT_KEYS = [
     "rendered_metallic",
     "rendered_reflectivity",
     "rendered_sun_visibility",
+    "rendered_dynamic_box_sun_visibility",
+    "rendered_dynamic_box_contact_shadow",
     "depths",
 ]
 
@@ -195,6 +197,24 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
     trainer.render_cfg["env_specular_scale"] = float(args.env_specular_scale)
     trainer.render_cfg["env_diffuse_mode"] = args.env_diffuse_mode
     trainer.render_cfg["env_ambient_floor"] = float(args.env_ambient_floor)
+    trainer.render_cfg["dynamic_box_sun_visibility"] = {
+        "enabled": bool(args.dynamic_box_sun_visibility),
+        "classes": args.dynamic_box_classes,
+        "size_scale": args.dynamic_box_size_scale,
+        "min_size": args.dynamic_box_min_size,
+        "shadow_strength": float(args.dynamic_box_shadow_strength),
+        "ray_epsilon": float(args.dynamic_box_ray_epsilon),
+        "chunk_size": int(args.dynamic_box_chunk_size),
+        "opacity_threshold": float(args.dynamic_box_opacity_threshold),
+        "receiver_static_only": bool(args.dynamic_box_receiver_static_only),
+        "receiver_dynamic_opacity_threshold": float(args.dynamic_box_receiver_dynamic_opacity_threshold),
+        "skip_inside_boxes": bool(args.dynamic_box_skip_inside_boxes),
+        "inside_margin": float(args.dynamic_box_inside_margin),
+        "contact_shadow_strength": float(args.dynamic_box_contact_shadow_strength),
+        "contact_shadow_height": float(args.dynamic_box_contact_shadow_height),
+        "contact_shadow_softness": float(args.dynamic_box_contact_shadow_softness),
+        "contact_shadow_dynamic_opacity_threshold": float(args.dynamic_box_contact_shadow_dynamic_opacity_threshold),
+    }
 
 
 def build_dataset_and_trainer(args: argparse.Namespace):
@@ -379,6 +399,22 @@ if __name__ == "__main__":
     parser.add_argument("--env_specular_scale", type=float, default=1.0, help="scale EnvMap specular IBL")
     parser.add_argument("--env_diffuse_mode", choices=["learned", "neutral"], default="learned", help="diffuse IBL mode")
     parser.add_argument("--env_ambient_floor", type=float, default=0.0, help="minimum ambient added to diffuse")
+    parser.add_argument("--dynamic_box_sun_visibility", action=argparse.BooleanOptionalAction, default=False, help="multiply sun visibility by per-pixel dynamic OBB ray tests")
+    parser.add_argument("--dynamic_box_classes", type=str, default="RigidNodes", help="comma-separated dynamic box model classes")
+    parser.add_argument("--dynamic_box_size_scale", type=str, default="1.05,1.05,1.05", help="scalar or x,y,z multiplier for dynamic boxes")
+    parser.add_argument("--dynamic_box_min_size", type=str, default="0.0,0.0,0.0", help="scalar or x,y,z minimum dynamic box size")
+    parser.add_argument("--dynamic_box_shadow_strength", type=float, default=1.0, help="0 leaves sun visibility unchanged, 1 fully blocks direct sun")
+    parser.add_argument("--dynamic_box_ray_epsilon", type=float, default=0.05, help="minimum positive ray distance before a box can occlude")
+    parser.add_argument("--dynamic_box_chunk_size", type=int, default=65536, help="number of valid pixels tested per ray-box chunk")
+    parser.add_argument("--dynamic_box_opacity_threshold", type=float, default=0.01, help="ignore pixels below this raster opacity")
+    parser.add_argument("--dynamic_box_receiver_static_only", action=argparse.BooleanOptionalAction, default=True, help="apply box shadows only to pixels that are not mostly dynamic objects")
+    parser.add_argument("--dynamic_box_receiver_dynamic_opacity_threshold", type=float, default=0.2, help="dynamic opacity cutoff for static-only shadow receivers")
+    parser.add_argument("--dynamic_box_skip_inside_boxes", action=argparse.BooleanOptionalAction, default=True, help="avoid self-shadowing pixels inside an object box")
+    parser.add_argument("--dynamic_box_inside_margin", type=float, default=0.02, help="meters subtracted from boxes for inside/self-shadow detection")
+    parser.add_argument("--dynamic_box_contact_shadow_strength", type=float, default=0.0, help="soft under-object contact shadow strength applied to sun and environment lighting")
+    parser.add_argument("--dynamic_box_contact_shadow_height", type=float, default=0.75, help="vertical distance in meters over which dynamic OBB contact shadow fades from the box bottom")
+    parser.add_argument("--dynamic_box_contact_shadow_softness", type=float, default=0.35, help="horizontal softness in meters outside the dynamic OBB footprint")
+    parser.add_argument("--dynamic_box_contact_shadow_dynamic_opacity_threshold", type=float, default=0.8, help="ignore contact shadow on pixels with dynamic opacity above this threshold")
 
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="OmegaConf overrides")
     parsed_args = parser.parse_args()

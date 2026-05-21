@@ -66,7 +66,8 @@ python -u tools/train.py \
     "${COMMON_OPTS[@]}" \
     trainer.optim.num_iters=${FREEZE_STEP} \
     data.pixel_source.load_region_maps=false \
-    trainer.losses.ref_region_consistency_albedo.w=0.0
+    trainer.losses.ref_region_consistency_albedo.w=0.0 \
+    trainer.losses.intensity.stage1_w=0.3
 
 STAGE1_FINAL=${RUN_DIR}/checkpoint_final.pth
 STAGE1_CKPT=${RUN_DIR}/checkpoint_${FREEZE_STEP}.pth
@@ -99,5 +100,7 @@ python -u tools/train.py \
     trainer.optim.num_iters=${FINAL_STEP} \
     data.pixel_source.load_region_maps=true \
     data.pixel_source.region_map_dir=${REGION_DIR} \
-    trainer.losses.intensity.normalize_valid_pixels=true \
-    trainer.losses.ref_neighborhood_smoothness.w=0.02
+    trainer.render.dynamic_box_sun_visibility.enabled=true \
+    trainer.losses.intensity.stage2_w=0.2 \
+    trainer.losses.ref_neighborhood_smoothness.w=0.05 \
+    trainer.losses.ref_region_consistency_albedo.w=0.05

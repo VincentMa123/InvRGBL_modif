@@ -162,6 +162,64 @@ class BasicTrainer(nn.Module):
         self.step = 0
         self.sun_intensity = 10
         self.spotlights = None  # inference-time spotlights for relighting
+
+    def _cfg_list(self, value, default):
+        if value is None:
+            return list(default)
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",")]
+            return [item for item in items if item]
+        return list(value)
+
+    def _cfg_vec3(self, value, default, device, dtype):
+        if value is None:
+            value = default
+        if isinstance(value, str):
+            values = [float(v.strip()) for v in value.split(",") if v.strip()]
+        elif isinstance(value, (int, float)):
+            values = [float(value)] * 3
+        else:
+            values = [float(v) for v in value]
+        if len(values) == 1:
+            values = values * 3
+        if len(values) != 3:
+            raise ValueError(f"Expected a scalar or 3 values, got {value}")
+        return torch.tensor(values, device=device, dtype=dtype)
+
+    def compute_lidar_intensity_for_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        image_infos: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        if not all(
+            key in outputs
+            for key in ("rendered_reflectivity", "rendered_roughness", "rendered_normal", "rendered_intensity")
+        ):
+            return outputs["rendered_intensity"]
+        if "lidar_viewdirs" not in image_infos:
+            return outputs["rendered_intensity"]
+
+        lidar_viewdirs = image_infos["lidar_viewdirs"].to(outputs["rendered_reflectivity"].device)
+        if lidar_viewdirs.shape[:2] != outputs["rendered_reflectivity"].shape[:2]:
+            return outputs["rendered_intensity"]
+
+        lidar_ranges = image_infos.get("lidar_ranges", None)
+        if lidar_ranges is None:
+            lidar_ranges = torch.ones_like(outputs["rendered_reflectivity"])
+        else:
+            lidar_ranges = lidar_ranges.to(outputs["rendered_reflectivity"].device)
+
+        H, W = outputs["rendered_reflectivity"].shape[:2]
+        pred_lidar_intensity = rendering_equation_lidar(
+            outputs["rendered_reflectivity"].reshape(-1, 1),
+            outputs["rendered_roughness"].reshape(-1, 1),
+            outputs["rendered_normal"].reshape(-1, 3),
+            lidar_viewdirs.reshape(-1, 3),
+            lidar_ranges.reshape(-1, 1),
+        ).reshape(H, W, 1)
+
+        valid_lidar_ray = torch.linalg.norm(lidar_viewdirs, dim=-1, keepdim=True) > 1e-6
+        return torch.where(valid_lidar_ray, pred_lidar_intensity, outputs["rendered_intensity"])
     
     @property
     def in_test_set(self):
@@ -430,112 +488,287 @@ class BasicTrainer(nn.Module):
                 {self.cur_frame.item(): sun_visibility_result.detach().cpu()}
             )
 
-    def render_shadow_map(self, sun_direction=None, shadow_map_size=2048, update=False):
-        """Render a depth map from the sun's perspective for shadow mapping.
-        
-        This replaces soft per-Gaussian BVH visibility with hard pixel-accurate
-        shadow tests against a rasterized sun-depth map.
-        """
-        if not hasattr(self, '_sun_shadow_map_list'):
-            self._sun_shadow_map_list = {}
-            self._sun_shadow_cam_list = {}
-        
-        frame_key = self.cur_frame.item()
-        if (frame_key in self._sun_shadow_map_list) and not update:
-            return
-        
-        if sun_direction is None:
-            if "Sky" not in self.models:
-                return
-            sun_direction = self.models["Sky"].get_sun_direction()
-        sun_direction = sun_direction.to(self.device)
-        sun_direction = sun_direction / sun_direction.norm().clamp_min(1e-6)
-        
-        with torch.no_grad():
-            # Collect all Gaussian means to compute scene bounds
-            all_means = []
-            all_quats = []
-            all_scales = []
-            all_opacities = []
-            for class_name in self.gaussian_classes.keys():
-                all_means.append(self.models[class_name].get_xyz)
-                all_quats.append(self.models[class_name].get_quats)
-                all_scales.append(self.models[class_name].get_scaling)
-                all_opacities.append(self.models[class_name].get_opacity[:, 0])
-            
-            means = torch.cat(all_means)
-            quats = torch.cat(all_quats)
-            scales = torch.cat(all_scales)
-            opacities = torch.cat(all_opacities)
-            
-            # Compute scene AABB
-            scene_min = means.min(dim=0)[0]
-            scene_max = means.max(dim=0)[0]
-            scene_center = (scene_min + scene_max) / 2.0
-            scene_radius = (scene_max - scene_min).norm() / 2.0
-            
-            # Place sun camera far along sun direction
-            sun_distance = max(scene_radius * 5.0, 100.0)
-            sun_cam_pos = scene_center - sun_direction * sun_distance
-            
-            # Build OpenCV-style camera-to-world matrix (same convention as cam.camtoworlds)
-            # so that torch.linalg.inv() produces the correct W2C for gsplat.
-            front = torch.nn.functional.normalize(sun_direction, dim=-1)  # z-axis points into scene
-            up = torch.tensor([0., 0., 1.], device=front.device, dtype=front.dtype)
-            if torch.abs(torch.dot(front, up)) > 0.99:
-                up = torch.tensor([0., 1., 0.], device=front.device, dtype=front.dtype)
-            right = torch.nn.functional.normalize(torch.cross(front, up), dim=-1)
-            up = torch.cross(right, front)
-            sun_R_c2w = torch.stack([right, up, front], dim=-1)  # [3, 3]
-            
-            sun_c2w = torch.eye(4, device=self.device, dtype=torch.float32)
-            sun_c2w[:3, :3] = sun_R_c2w
-            sun_c2w[:3, 3] = sun_cam_pos
-            
-            sun_viewmat = torch.linalg.inv(sun_c2w)  # W2C, consistent with working render path
-            
-            # Perspective intrinsics covering the scene at sun_distance
-            half_fov = torch.arctan(scene_radius / sun_distance)
-            fx = fy = shadow_map_size / (2.0 * torch.tan(half_fov).item())
-            cx = cy = shadow_map_size / 2.0
-            sun_K = torch.tensor([
-                [fx, 0.0, cx],
-                [0.0, fy, cy],
-                [0.0, 0.0, 1.0]
-            ], dtype=torch.float32, device=self.device)
-            
-            # Dummy colors (depth rendering doesn't need real colors)
-            dummy_colors = torch.zeros(means.shape[0], 3, device=self.device)
-            
-            from gsplat import rasterization
-            shadow_render, shadow_alpha, _ = rasterization(
-                means=means,
-                quats=quats,
-                scales=scales,
-                opacities=opacities,
-                colors=dummy_colors,
-                viewmats=sun_viewmat[None, ...],
-                Ks=sun_K[None, ...],
-                width=shadow_map_size,
-                height=shadow_map_size,
-                render_mode="D",
-                packed=self.render_cfg.packed,
-                absgrad=False,
-                sparse_grad=False,
-                rasterize_mode="classic",
+    def _get_current_instance_boxes(self, model):
+        if not all(
+            hasattr(model, attr)
+            for attr in ("instances_fv", "instances_quats", "instances_trans", "instances_size")
+        ):
+            return None
+
+        cur_frame = int(self.cur_frame.item())
+        if cur_frame < 0 or cur_frame >= model.instances_fv.shape[0]:
+            return None
+
+        valid_mask = model.instances_fv[cur_frame].bool()
+        if not valid_mask.any():
+            return None
+
+        quats_cur_frame = model.instances_quats[cur_frame]
+        trans_cur_frame = model.instances_trans[cur_frame]
+        if quats_cur_frame.dim() > 2:
+            quats_cur_frame = quats_cur_frame[..., 0, :]
+
+        num_frames = model.instances_fv.shape[0]
+        use_interp = (
+            getattr(model, "in_test_set", False)
+            and cur_frame - 1 > 0
+            and cur_frame + 1 < num_frames
+        )
+        if use_interp:
+            inter_valid = (
+                model.instances_fv[cur_frame - 1]
+                & model.instances_fv[cur_frame + 1]
             )
-            
-            # shadow_render shape: [1, H, W, 1] for render_mode="D"
-            shadow_depth = shadow_render[0, ..., 0]  # [H, W]
-            
-            self._sun_shadow_map_list[frame_key] = shadow_depth
-            self._sun_shadow_cam_list[frame_key] = {
-                "viewmat": sun_viewmat,
-                "K": sun_K,
-                "size": shadow_map_size,
-                "direction": sun_direction,
-            }
-    
+            if inter_valid.any():
+                quats_prev = model.instances_quats[cur_frame - 1]
+                quats_next = model.instances_quats[cur_frame + 1]
+                if quats_prev.dim() > 2:
+                    quats_prev = quats_prev[..., 0, :]
+                    quats_next = quats_next[..., 0, :]
+                interp_quats = interpolate_quats(quats_prev.clone(), quats_next.clone())
+                quats_cur_frame = torch.where(
+                    inter_valid[:, None], interp_quats, quats_cur_frame
+                )
+                interp_trans = (
+                    model.instances_trans[cur_frame - 1]
+                    + model.instances_trans[cur_frame + 1]
+                ) * 0.5
+                trans_cur_frame = torch.where(
+                    inter_valid[:, None], interp_trans, trans_cur_frame
+                )
+
+        quats = model.quat_act(quats_cur_frame[valid_mask])
+        rotations = quat_to_rotmat(quats)
+        centers = trans_cur_frame[valid_mask]
+        sizes = model.instances_size[valid_mask]
+
+        finite = (
+            torch.isfinite(centers).all(dim=-1)
+            & torch.isfinite(rotations).flatten(1).all(dim=-1)
+            & torch.isfinite(sizes).all(dim=-1)
+            & (sizes > 0).all(dim=-1)
+        )
+        if not finite.any():
+            return None
+        return centers[finite], rotations[finite], sizes[finite]
+
+    def _collect_dynamic_sun_boxes(self, cfg, device, dtype):
+        class_names = self._cfg_list(cfg.get("classes", "RigidNodes"), ["RigidNodes"])
+        centers, rotations, sizes = [], [], []
+        for class_name in class_names:
+            model = self.models.get(class_name, None)
+            if model is None:
+                continue
+            boxes = self._get_current_instance_boxes(model)
+            if boxes is None:
+                continue
+            box_centers, box_rotations, box_sizes = boxes
+            centers.append(box_centers.to(device=device, dtype=dtype))
+            rotations.append(box_rotations.to(device=device, dtype=dtype))
+            sizes.append(box_sizes.to(device=device, dtype=dtype))
+
+        if len(centers) == 0:
+            return None
+        return torch.cat(centers, dim=0), torch.cat(rotations, dim=0), torch.cat(sizes, dim=0)
+
+    @torch.no_grad()
+    def compute_dynamic_box_sun_visibility(
+        self,
+        means_map: torch.Tensor,
+        depth_map: torch.Tensor,
+        opacity_map: torch.Tensor,
+        sun_direction: torch.Tensor,
+        dynamic_opacity_map: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Per-pixel direct-sun visibility from current-frame dynamic OBBs.
+
+        The BVH cache traces from Gaussian centers. This image-space test traces
+        from the rendered surface point at each pixel toward the sun and asks
+        whether that ray intersects a dynamic object box.
+        """
+        cfg = self.render_cfg.get("dynamic_box_sun_visibility", {})
+        if cfg is None or not cfg.get("enabled", False):
+            return torch.ones_like(depth_map)
+
+        device = means_map.device
+        dtype = means_map.dtype
+        boxes = self._collect_dynamic_sun_boxes(cfg, device, dtype)
+        if boxes is None:
+            return torch.ones_like(depth_map)
+
+        centers, rotations, raw_sizes = boxes
+        if centers.shape[0] == 0:
+            return torch.ones_like(depth_map)
+
+        size_scale = self._cfg_vec3(cfg.get("size_scale", [1.05, 1.05, 1.05]), [1.05, 1.05, 1.05], device, dtype)
+        min_size = self._cfg_vec3(cfg.get("min_size", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0], device, dtype)
+        hit_half_sizes = torch.maximum(raw_sizes * size_scale, min_size).clamp_min(1e-4) * 0.5
+
+        inside_margin = float(cfg.get("inside_margin", 0.02))
+        skip_half_sizes = (raw_sizes * 0.5 - inside_margin).clamp_min(0.0)
+        skip_inside_boxes = bool(cfg.get("skip_inside_boxes", True))
+
+        sun_direction = sun_direction.to(device=device, dtype=dtype)
+        sun_direction = sun_direction / sun_direction.norm().clamp_min(1e-6)
+        ray_dirs_local = torch.einsum("j,bjk->bk", sun_direction, rotations)
+
+        H, W = depth_map.shape[:2]
+        points = means_map.reshape(-1, 3)
+        depth = depth_map.reshape(-1)
+        opacity = opacity_map.reshape(-1)
+        valid = (
+            torch.isfinite(points).all(dim=-1)
+            & torch.isfinite(depth)
+            & (depth > 0)
+            & (opacity > float(cfg.get("opacity_threshold", 0.01)))
+        )
+        if dynamic_opacity_map is not None and cfg.get("receiver_static_only", True):
+            dynamic_opacity = dynamic_opacity_map.reshape(-1).to(device=device, dtype=dtype)
+            valid = valid & (
+                dynamic_opacity
+                < float(cfg.get("receiver_dynamic_opacity_threshold", 0.2))
+            )
+
+        visibility = torch.ones(points.shape[0], 1, device=device, dtype=dtype)
+        valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+        if valid_indices.numel() == 0:
+            return visibility.reshape(H, W, 1)
+
+        ray_epsilon = float(cfg.get("ray_epsilon", 0.05))
+        shadow_strength = float(cfg.get("shadow_strength", 1.0))
+        shadow_strength = max(0.0, min(1.0, shadow_strength))
+        chunk_size = int(cfg.get("chunk_size", 65536))
+        chunk_size = max(1, chunk_size)
+
+        for start in range(0, valid_indices.numel(), chunk_size):
+            idx = valid_indices[start:start + chunk_size]
+            pts = points[idx]
+            rel = pts[:, None, :] - centers[None, :, :]
+            pts_local = torch.einsum("mbj,bjk->mbk", rel, rotations)
+            dirs_local = ray_dirs_local[None, :, :].expand_as(pts_local)
+
+            parallel = dirs_local.abs() < 1e-8
+            denom = torch.where(parallel, torch.ones_like(dirs_local), dirs_local)
+            t0 = (-hit_half_sizes[None, :, :] - pts_local) / denom
+            t1 = (hit_half_sizes[None, :, :] - pts_local) / denom
+            t_near_axis = torch.minimum(t0, t1)
+            t_far_axis = torch.maximum(t0, t1)
+
+            neg_inf = torch.full_like(t_near_axis, -torch.inf)
+            pos_inf = torch.full_like(t_far_axis, torch.inf)
+            t_near_axis = torch.where(parallel, neg_inf, t_near_axis)
+            t_far_axis = torch.where(parallel, pos_inf, t_far_axis)
+
+            outside_parallel = parallel & (pts_local.abs() > hit_half_sizes[None, :, :])
+            t_enter = t_near_axis.max(dim=-1).values
+            t_exit = t_far_axis.min(dim=-1).values
+
+            hit = (
+                ~outside_parallel.any(dim=-1)
+                & (t_exit > torch.maximum(
+                    t_enter,
+                    torch.tensor(ray_epsilon, device=device, dtype=dtype),
+                ))
+                & (t_exit > ray_epsilon)
+            )
+            if skip_inside_boxes:
+                inside = (pts_local.abs() <= skip_half_sizes[None, :, :]).all(dim=-1)
+                hit = hit & ~inside
+
+            shadowed = hit.any(dim=-1)
+            visibility[idx, 0] = torch.where(
+                shadowed,
+                torch.full((idx.shape[0],), 1.0 - shadow_strength, device=device, dtype=dtype),
+                visibility[idx, 0],
+            )
+
+        return visibility.reshape(H, W, 1)
+
+    @torch.no_grad()
+    def compute_dynamic_box_contact_shadow(
+        self,
+        means_map: torch.Tensor,
+        depth_map: torch.Tensor,
+        opacity_map: torch.Tensor,
+        dynamic_opacity_map: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Soft under-object contact shadow from current-frame dynamic OBBs.
+
+        Direct OBB sun visibility only removes analytic sun. The region under a
+        vehicle is usually dark because sky/environment light is occluded too,
+        so this term is multiplied into the image-space AO map.
+        """
+        cfg = self.render_cfg.get("dynamic_box_sun_visibility", {})
+        if cfg is None or not cfg.get("enabled", False):
+            return torch.ones_like(depth_map)
+
+        strength = float(cfg.get("contact_shadow_strength", 0.0))
+        if strength <= 0:
+            return torch.ones_like(depth_map)
+        strength = max(0.0, min(1.0, strength))
+
+        device = means_map.device
+        dtype = means_map.dtype
+        boxes = self._collect_dynamic_sun_boxes(cfg, device, dtype)
+        if boxes is None:
+            return torch.ones_like(depth_map)
+
+        centers, rotations, raw_sizes = boxes
+        if centers.shape[0] == 0:
+            return torch.ones_like(depth_map)
+
+        size_scale = self._cfg_vec3(
+            cfg.get("contact_shadow_size_scale", cfg.get("size_scale", [1.05, 1.05, 1.05])),
+            [1.05, 1.05, 1.05],
+            device,
+            dtype,
+        )
+        min_size = self._cfg_vec3(cfg.get("min_size", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0], device, dtype)
+        half_sizes = torch.maximum(raw_sizes * size_scale, min_size).clamp_min(1e-4) * 0.5
+
+        H, W = depth_map.shape[:2]
+        points = means_map.reshape(-1, 3)
+        depth = depth_map.reshape(-1)
+        opacity = opacity_map.reshape(-1)
+        valid = (
+            torch.isfinite(points).all(dim=-1)
+            & torch.isfinite(depth)
+            & (depth > 0)
+            & (opacity > float(cfg.get("opacity_threshold", 0.01)))
+        )
+        if dynamic_opacity_map is not None:
+            dynamic_opacity = dynamic_opacity_map.reshape(-1).to(device=device, dtype=dtype)
+            threshold = float(
+                cfg.get(
+                    "contact_shadow_dynamic_opacity_threshold",
+                    cfg.get("receiver_dynamic_opacity_threshold", 0.2),
+                )
+            )
+            valid = valid & (dynamic_opacity < threshold)
+
+        contact = torch.ones(points.shape[0], 1, device=device, dtype=dtype)
+        valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+        if valid_indices.numel() == 0:
+            return contact.reshape(H, W, 1)
+
+        height = max(float(cfg.get("contact_shadow_height", 0.75)), 1e-4)
+        softness = max(float(cfg.get("contact_shadow_softness", 0.35)), 1e-4)
+        chunk_size = max(1, int(cfg.get("chunk_size", 65536)))
+
+        for start in range(0, valid_indices.numel(), chunk_size):
+            idx = valid_indices[start:start + chunk_size]
+            rel = points[idx, None, :] - centers[None, :, :]
+            pts_local = torch.einsum("mbj,bjk->mbk", rel, rotations)
+
+            xy_excess = (pts_local[..., :2].abs() - half_sizes[None, :, :2]).clamp_min(0.0)
+            footprint_fade = torch.exp(-((xy_excess / softness) ** 2).sum(dim=-1))
+            bottom_distance = (pts_local[..., 2] + half_sizes[None, :, 2]).abs()
+            vertical_fade = torch.exp(-((bottom_distance / height) ** 2))
+            occlusion = (footprint_fade * vertical_fade).amax(dim=-1).clamp(0.0, 1.0)
+            contact[idx, 0] = (1.0 - strength * occlusion).clamp(0.0, 1.0)
+
+        return contact.reshape(H, W, 1)
+
     def rebuild_all_visibility(self, num_frames: int, sun_direction=None):
         """Rebuild BVH visibility caches for all frames at current model state.
         
@@ -549,9 +782,6 @@ class BasicTrainer(nn.Module):
             self._incident_dirs_list.clear()
             self._incident_areas_list.clear()
         self._sun_visibility_tracings_list.clear()
-        if hasattr(self, '_sun_shadow_map_list'):
-            self._sun_shadow_map_list.clear()
-            self._sun_shadow_cam_list.clear()
         old_cur_frame = self.cur_frame
         for t in range(num_frames):
             self.cur_frame = torch.tensor(t, device=self.device)
@@ -570,9 +800,6 @@ class BasicTrainer(nn.Module):
         """
         for frame_idx in set(int(t) for t in frame_indices):
             self._sun_visibility_tracings_list.pop(frame_idx, None)
-            if hasattr(self, '_sun_shadow_map_list'):
-                self._sun_shadow_map_list.pop(frame_idx, None)
-                self._sun_shadow_cam_list.pop(frame_idx, None)
             if full:
                 self._visibility_tracings_list.pop(frame_idx, None)
                 self._incident_dirs_list.pop(frame_idx, None)
@@ -853,13 +1080,24 @@ class BasicTrainer(nn.Module):
         if "CamPose" in self.models.keys() and not novel_view:
             camtoworlds = self.models["CamPose"](camtoworlds, image_ids)
         
+        height = camera_infos["height"]
+        width = camera_infos["width"]
+        if torch.is_tensor(height):
+            height = int(height.detach().cpu().item())
+        else:
+            height = int(height)
+        if torch.is_tensor(width):
+            width = int(width.detach().cpu().item())
+        else:
+            width = int(width)
+
         # collect camera information
         camera_dict = dataclass_camera(
             camtoworlds=camtoworlds,
             camtoworlds_gt=camtoworlds_gt,
             Ks=camera_infos["intrinsics"],
-            H=camera_infos["height"],
-            W=camera_infos["width"]
+            H=height,
+            W=width
         )
         
         return camera_dict
@@ -896,12 +1134,6 @@ class BasicTrainer(nn.Module):
                     sun_update = sun_update or (self.step % update_interval == 0)
             if use_bvh_sun_visibility:
                 self.update_sun_visibility(update=sun_update, sun_direction=sun_direction)
-                if self.render_cfg.get("use_shadow_map", False):
-                    self.render_shadow_map(
-                        sun_direction=sun_direction,
-                        shadow_map_size=int(self.render_cfg.get("shadow_map_size", 2048)),
-                        update=sun_update,
-                    )
         else:
             if (self.step > self.freeze_step) and (self.step % 100 == 1):
                 update = random.random() < 0.01   
@@ -1049,6 +1281,25 @@ class BasicTrainer(nn.Module):
             renders = renders[0]
             alphas = alphas[0].squeeze(-1)
             assert self.render_cfg.batch_size == 1, "batch size must be 1, will support batch size > 1 in the future"
+
+            def rasterize_opacity(point_mask):
+                _, mask_alphas, _ = rasterization(
+                    means=gs.means,
+                    quats=gs.quats,
+                    scales=gs.scales,
+                    opacities=gs.opacities.squeeze() * point_mask.to(gs.opacities.device),
+                    colors=torch.zeros_like(gs.rgbs),
+                    viewmats=torch.linalg.inv(cam.camtoworlds)[None, ...],
+                    Ks=cam.Ks[None, ...],
+                    width=cam.W,
+                    height=cam.H,
+                    packed=self.render_cfg.packed,
+                    absgrad=False,
+                    sparse_grad=False,
+                    rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
+                    **kwargs,
+                )
+                return mask_alphas[0].squeeze(-1)
             
             if self.pbr:
                 rendered_rgb,rendered_normal,rendered_albedos,rendered_roughness, rendered_metallic, rendered_reflectivity, \
@@ -1130,18 +1381,47 @@ class BasicTrainer(nn.Module):
                     )
                     pbr_sun_visibility = rendered_sun_visibility
                     pbr_reflectivity = rendered_reflectivity
+                    dynamic_box_sun_visibility = None
+                    dynamic_box_contact_shadow = None
+                    dynamic_opacity_map = None
 
-                    # Shadow map override: if rendered, use rasterized sun depth map
-                    shadow_map_kwargs = {}
-                    if self.render_cfg.get("use_shadow_map", False):
-                        frame_key = self.cur_frame.item()
-                        if frame_key in getattr(self, '_sun_shadow_map_list', {}):
-                            shadow_map_kwargs = {
-                                "shadow_map": self._sun_shadow_map_list[frame_key],
-                                "sun_viewmat": self._sun_shadow_cam_list[frame_key]["viewmat"],
-                                "sun_K": self._sun_shadow_cam_list[frame_key]["K"],
-                                "shadow_map_size": self._sun_shadow_cam_list[frame_key]["size"],
-                            }
+                    dynamic_box_cfg = self.render_cfg.get("dynamic_box_sun_visibility", {})
+                    if dynamic_box_cfg is None:
+                        dynamic_box_cfg = {}
+                    if dynamic_box_cfg.get("enabled", False):
+                        contact_shadow_strength = float(dynamic_box_cfg.get("contact_shadow_strength", 0.0))
+                        need_dynamic_opacity_map = (
+                            dynamic_box_cfg.get("receiver_static_only", True)
+                            or contact_shadow_strength > 0
+                        )
+                        if need_dynamic_opacity_map:
+                            dynamic_point_mask = (
+                                self.pts_labels != self.gaussian_classes["Background"]
+                            ).float()
+                            dynamic_opacity_map = rasterize_opacity(dynamic_point_mask).detach()
+                        dynamic_box_sun_visibility = self.compute_dynamic_box_sun_visibility(
+                            means_map=means_map.detach(),
+                            depth_map=rendered_depth.detach(),
+                            opacity_map=alphas[..., None].detach(),
+                            sun_direction=sun_dir.detach(),
+                            dynamic_opacity_map=dynamic_opacity_map,
+                        )
+                        pbr_sun_visibility = (pbr_sun_visibility * dynamic_box_sun_visibility).clamp(0.0, 1.0)
+                        rendered_sun_visibility = pbr_sun_visibility
+                        if contact_shadow_strength > 0:
+                            dynamic_box_contact_shadow = self.compute_dynamic_box_contact_shadow(
+                                means_map=means_map.detach(),
+                                depth_map=rendered_depth.detach(),
+                                opacity_map=alphas[..., None].detach(),
+                                dynamic_opacity_map=dynamic_opacity_map,
+                            )
+                            pbr_sun_visibility = (pbr_sun_visibility * dynamic_box_contact_shadow).clamp(0.0, 1.0)
+                            rendered_sun_visibility = pbr_sun_visibility
+                            ao_map = (
+                                dynamic_box_contact_shadow
+                                if ao_map is None
+                                else (ao_map * dynamic_box_contact_shadow).clamp(0.0, 1.0)
+                            )
 
                     pbr_rgb = image_space_pbr(
                         albedo_map=pbr_albedo,
@@ -1164,7 +1444,6 @@ class BasicTrainer(nn.Module):
                         env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
                         env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
                         env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
-                        **shadow_map_kwargs,
                     )
                     pbr_rgb = pbr_rgb * alphas[..., None]
 
@@ -1186,6 +1465,14 @@ class BasicTrainer(nn.Module):
                             'rendered_sun_visibility':rendered_sun_visibility,
                             'incident_sun_light':incident_sun_light,
                             })
+                if 'dynamic_box_sun_visibility' in locals() and dynamic_box_sun_visibility is not None:
+                    info.update({
+                        'rendered_dynamic_box_sun_visibility': dynamic_box_sun_visibility,
+                    })
+                if 'dynamic_box_contact_shadow' in locals() and dynamic_box_contact_shadow is not None:
+                    info.update({
+                        'rendered_dynamic_box_contact_shadow': dynamic_box_contact_shadow,
+                    })
 
             else:
                 assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
@@ -1216,6 +1503,14 @@ class BasicTrainer(nn.Module):
             'rendered_sun_visibility': self.info['rendered_sun_visibility'],
             'incident_sun_light':self.info['incident_sun_light'],
             })
+            if 'rendered_dynamic_box_sun_visibility' in self.info:
+                results.update({
+                    'rendered_dynamic_box_sun_visibility': self.info['rendered_dynamic_box_sun_visibility'],
+                })
+            if 'rendered_dynamic_box_contact_shadow' in self.info:
+                results.update({
+                    'rendered_dynamic_box_contact_shadow': self.info['rendered_dynamic_box_contact_shadow'],
+                })
         
         if self.training:
             self.info["means2d"].retain_grad()
@@ -1459,15 +1754,23 @@ class BasicTrainer(nn.Module):
             intensity_mask = intensity_mask * valid_loss_mask[..., None]
             intensity_cfg = self.losses_dict.get("intensity", {})
             normalize_valid_pixels = bool(intensity_cfg.get("normalize_valid_pixels", False))
+            intensity_weight = self.get_loss_weight("intensity")
+            if isinstance(intensity_cfg, dict):
+                stage_weight = intensity_cfg.get("stage2_w" if stage2_active else "stage1_w", None)
+            else:
+                stage_weight = getattr(intensity_cfg, "stage2_w" if stage2_active else "stage1_w", None)
+            if stage_weight is not None:
+                intensity_weight = stage_weight
             if intensity_mask.sum() > 0:
-                intensity_diff = torch.abs(outputs["rendered_intensity"] - image_infos["intensity_images"])
+                predicted_lidar_intensity = self.compute_lidar_intensity_for_loss(outputs, image_infos)
+                intensity_diff = torch.abs(predicted_lidar_intensity - image_infos["intensity_images"])
                 if normalize_valid_pixels:
                     Ll1_intensity = (intensity_diff * intensity_mask).sum() / intensity_mask.sum().clamp_min(1.0)
                 else:
                     Ll1_intensity = (intensity_diff * intensity_mask).mean()
             else:
                 Ll1_intensity = outputs["rendered_intensity"].sum() * 0.0
-            loss_dict["intensity_loss"] = self.get_loss_weight("intensity") * Ll1_intensity
+            loss_dict["intensity_loss"] = intensity_weight * Ll1_intensity
 
         # Material priors are active in Stage 1. After freeze, roughness,
         # normals, metallic, and sun visibility are fixed; RGB/LiDAR albedo and

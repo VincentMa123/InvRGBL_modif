@@ -105,6 +105,24 @@ def sparse_lidar_map_downsampler(lidar_depth_map, downscale_factor):
     downsampled_lidar_map[raw_mask > 0] = raw_avg[raw_mask > 0] / raw_mask[raw_mask > 0]
     return downsampled_lidar_map
 
+def sparse_lidar_tensor_downsampler(lidar_tensor_map, valid_mask, downscale_factor):
+    mask = (valid_mask > 1e-3).float()
+    weighted = lidar_tensor_map * mask[..., None]
+    raw_avg = torch.nn.functional.interpolate(
+        weighted.permute(2, 0, 1).unsqueeze(0),
+        scale_factor=downscale_factor,
+        mode="area",
+    ).squeeze(0).permute(1, 2, 0)
+    raw_mask = torch.nn.functional.interpolate(
+        mask.unsqueeze(0).unsqueeze(0),
+        scale_factor=downscale_factor,
+        mode="area",
+    ).squeeze(0).squeeze(0)
+    downsampled = torch.zeros_like(raw_avg)
+    valid = raw_mask > 0
+    downsampled[valid] = raw_avg[valid] / raw_mask[valid].unsqueeze(-1)
+    return downsampled
+
 class CameraData(object):
     def __init__(
         self,
@@ -170,6 +188,8 @@ class CameraData(object):
         if self.load_region_maps_enabled:
             self.load_region_maps()
         self.lidar_depth_maps = None # will be loaded by: self.load_depth()
+        self.lidar_viewdirs_maps = None
+        self.lidar_ranges_maps = None
         self.image_error_maps = None # will be built by: self.build_image_error_buffer()
         self.to(self.device)
         self.downscale_factor = 1.0
@@ -597,8 +617,14 @@ class CameraData(object):
     def load_depth(
         self,
         lidar_depth_maps: Tensor,
+        lidar_viewdirs_maps: Tensor = None,
+        lidar_ranges_maps: Tensor = None,
     ):
         self.lidar_depth_maps = lidar_depth_maps.to(self.device)
+        if lidar_viewdirs_maps is not None:
+            self.lidar_viewdirs_maps = lidar_viewdirs_maps.to(self.device)
+        if lidar_ranges_maps is not None:
+            self.lidar_ranges_maps = lidar_ranges_maps.to(self.device)
         
     def load_time(
         self,
@@ -703,6 +729,10 @@ class CameraData(object):
             self.region_labels = self.region_labels.to(device)
         if self.lidar_depth_maps is not None:
             self.lidar_depth_maps = self.lidar_depth_maps.to(device)
+        if self.lidar_viewdirs_maps is not None:
+            self.lidar_viewdirs_maps = self.lidar_viewdirs_maps.to(device)
+        if self.lidar_ranges_maps is not None:
+            self.lidar_ranges_maps = self.lidar_ranges_maps.to(device)
         if self.image_error_maps is not None:
             self.image_error_maps = self.image_error_maps.to(device)
     
@@ -895,8 +925,14 @@ class CameraData(object):
                 )
             
         lidar_depth_map = None
+        lidar_viewdirs_map = None
+        lidar_ranges_map = None
         if self.lidar_depth_maps is not None:
             lidar_depth_map = self.lidar_depth_maps[frame_idx]
+            if self.lidar_viewdirs_maps is not None:
+                lidar_viewdirs_map = self.lidar_viewdirs_maps[frame_idx]
+            if self.lidar_ranges_maps is not None:
+                lidar_ranges_map = self.lidar_ranges_maps[frame_idx]
             if self.downscale_factor != 1.0:
                 # BUG: cannot use, need futher investigation
                 # if self.data_cfg.denser_lidar_times > 1:
@@ -914,7 +950,28 @@ class CameraData(object):
                 #         .squeeze(0)
                 #     )
                 # else:
+                lidar_valid_mask = lidar_depth_map > 1e-3
                 lidar_depth_map = sparse_lidar_map_downsampler(lidar_depth_map, self.downscale_factor)
+                if lidar_viewdirs_map is not None:
+                    lidar_viewdirs_map = sparse_lidar_tensor_downsampler(
+                        lidar_viewdirs_map,
+                        lidar_valid_mask,
+                        self.downscale_factor,
+                    )
+                    lidar_viewdirs_norm = torch.linalg.norm(
+                        lidar_viewdirs_map, dim=-1, keepdim=True
+                    )
+                    lidar_viewdirs_map = torch.where(
+                        lidar_viewdirs_norm > 1e-6,
+                        lidar_viewdirs_map / lidar_viewdirs_norm.clamp_min(1e-6),
+                        torch.zeros_like(lidar_viewdirs_map),
+                    )
+                if lidar_ranges_map is not None:
+                    lidar_ranges_map = sparse_lidar_tensor_downsampler(
+                        lidar_ranges_map,
+                        lidar_valid_mask,
+                        self.downscale_factor,
+                    )
 
         if self.normalized_time is not None:
             normalized_time = torch.full(
@@ -959,6 +1016,8 @@ class CameraData(object):
             "vehicle_masks": vehicle_mask,
             "egocar_masks": egocar_mask,
             "lidar_depth_map": lidar_depth_map,
+            "lidar_viewdirs": lidar_viewdirs_map,
+            "lidar_ranges": lidar_ranges_map,
             "region_labels": region_labels,
         }
         if self.normal_images is not None:

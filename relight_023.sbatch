@@ -25,30 +25,25 @@ set -euo pipefail
 CHECKPOINT=work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/checkpoint_final.pth
 DATA_ROOT=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training
 
-COMMON_RELIGHT_OPTS=(
-    --resume_from "${CHECKPOINT}"
-    --split full
-    --max_frames 5
-    --keys rgbs,rendered_pbr,rendered_albedos,rendered_sun_visibility
-    --env_diffuse_scale 0.02
-    --env_specular_scale 0.1
-    --env_diffuse_mode neutral
-    --force_dielectric
-    --min_roughness 0.25
-    --sky_scale 0.04
-    --exposure_scale 0.35
-    --disable_affine
-    data.data_root="${DATA_ROOT}"
-    data.scene_idx=23
-    data.start_timestep=0
-    data.end_timestep=50
-)
-
-# ---------- Sunset relight ----------
-python tools/relight.py \
-    --name sunset_5f \
+  python -u tools/relight.py \
+    --resume_from work_dirs/invrgbl/waymo023_dyn_1cam_ispbr/checkpoint_final.pth \
+    --name sunset_box_sunvis_5f \
     --preset sunset \
-    "${COMMON_RELIGHT_OPTS[@]}"
+    --split full \
+    --max_frames 5 \
+    --dynamic_box_sun_visibility \
+    --dynamic_box_receiver_static_only \
+    --dynamic_box_receiver_dynamic_opacity_threshold 0.5 \
+    --dynamic_box_shadow_strength 0.7 \
+    --dynamic_box_contact_shadow_strength 0.65 \
+    --dynamic_box_contact_shadow_height 0.75 \
+    --dynamic_box_contact_shadow_softness 0.35 \
+    --keys rgbs,rendered_pbr,rendered_sun_visibility,rendered_dynamic_box_sun_visibility,rendered_dynamic_box_contact_shadow \
+    data.data_root=/lab/haoq_lab/cse12310504/InvRGBL/data/waymo/processed/training \
+    data.scene_idx=23 \
+    data.start_timestep=0 \
+    data.end_timestep=50
+
 
 # ---------- Night relight ----------
 # Uncomment the next block to run night relighting instead of sunset.

@@ -650,6 +650,8 @@ class DrivingDataset(SceneDataset):
         """
         for cam in self.pixel_source.camera_data.values():
             lidar_depth_maps = []
+            lidar_viewdirs_maps = []
+            lidar_ranges_maps = []
             for frame_idx in tqdm(
                 range(len(cam)), 
                 desc="Projecting lidar pts on images for camera {}".format(cam.cam_name),
@@ -664,6 +666,8 @@ class DrivingDataset(SceneDataset):
                     lidar_infos["lidar_origins"]
                     + lidar_infos["lidar_viewdirs"] * lidar_infos["lidar_ranges"]
                 )
+                lidar_viewdirs_world = lidar_infos["lidar_viewdirs"]
+                lidar_ranges = lidar_infos["lidar_ranges"].squeeze(-1)
                 
                 # project lidar points to the image plane
                 if cam.undistort:
@@ -697,19 +701,40 @@ class DrivingDataset(SceneDataset):
                 ) # (num_pts, )
                 depth = depth[valid_mask]
                 _cam_points = cam_points[valid_mask]
-                depth_map = torch.zeros(
-                    cam.HEIGHT, cam.WIDTH
-                ).to(self.device)
-                depth_map[
-                    _cam_points[:, 1].long(), _cam_points[:, 0].long()
-                ] = depth.squeeze(-1)
-                lidar_depth_maps.append(depth_map)
-                
-                # used to filter out the lidar points that are visible from the camera
+                lidar_viewdirs_valid = -lidar_viewdirs_world[valid_mask]
+                lidar_ranges_valid = lidar_ranges[valid_mask]
                 visible_indices = torch.arange(
                     self.lidar_source.num_points, device=self.device
                 )[lidar_infos["lidar_mask"]][valid_mask]
+                if depth.numel() > 0:
+                    sort_idx = torch.argsort(depth, descending=True)
+                    depth = depth[sort_idx]
+                    _cam_points = _cam_points[sort_idx]
+                    lidar_viewdirs_valid = lidar_viewdirs_valid[sort_idx]
+                    lidar_ranges_valid = lidar_ranges_valid[sort_idx]
+                    visible_indices = visible_indices[sort_idx]
+
+                pixel_y = _cam_points[:, 1].long()
+                pixel_x = _cam_points[:, 0].long()
+                depth_map = torch.zeros(
+                    cam.HEIGHT, cam.WIDTH
+                ).to(self.device)
+                lidar_viewdirs_map = torch.zeros(
+                    cam.HEIGHT, cam.WIDTH, 3, device=self.device
+                )
+                lidar_ranges_map = torch.zeros(
+                    cam.HEIGHT, cam.WIDTH, 1, device=self.device
+                )
+                depth_map[pixel_y, pixel_x] = depth.squeeze(-1)
+                lidar_viewdirs_map[pixel_y, pixel_x] = torch.nn.functional.normalize(
+                    lidar_viewdirs_valid, dim=-1, eps=1e-6
+                )
+                lidar_ranges_map[pixel_y, pixel_x, 0] = lidar_ranges_valid
+                lidar_depth_maps.append(depth_map)
+                lidar_viewdirs_maps.append(lidar_viewdirs_map)
+                lidar_ranges_maps.append(lidar_ranges_map)
                 
+                # used to filter out the lidar points that are visible from the camera
                 self.lidar_source.visible_masks[visible_indices] = True
                 
                 # attribute the color of the nearest pixel to the lidar point
@@ -719,7 +744,9 @@ class DrivingDataset(SceneDataset):
                 self.lidar_source.colors[visible_indices] = points_color
 
             cam.load_depth(
-                torch.stack(lidar_depth_maps, dim=0).to(self.device).float()
+                torch.stack(lidar_depth_maps, dim=0).to(self.device).float(),
+                torch.stack(lidar_viewdirs_maps, dim=0).to(self.device).float(),
+                torch.stack(lidar_ranges_maps, dim=0).to(self.device).float(),
             )
             
         if delete_out_of_view_points:

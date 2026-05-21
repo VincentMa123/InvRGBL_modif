@@ -57,14 +57,15 @@ def GGX_specular(
 
 ### USING ###
 def rendering_equation_lidar(base_color, roughness, normals, viewdirs, view_dists):
-    normals = normals.detach()
+    normals = F.normalize(normals.detach(), dim=-1, eps=1e-6)
 
     # Ensure viewdirs has shape (N, 1, 3) for broadcasting
     if viewdirs.dim() == 2:
         viewdirs = viewdirs[:, None, :]  # (N, 1, 3)
+    viewdirs = F.normalize(viewdirs, dim=-1, eps=1e-6)
 
     # cos(theta) = n · omega_o
-    n_d_i = (normals[:, None, :] * viewdirs).sum(-1, keepdim=True).clamp(min=1e-6)
+    n_d_i = (normals[:, None, :] * viewdirs).sum(-1, keepdim=True).abs().clamp(min=1e-6)
     cos_theta = n_d_i
     cos2_theta = cos_theta ** 2
 
@@ -308,8 +309,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
                     reflectivity_map=None, reflectivity_f0_strength=0.35,
                     ao_map=None, specular_ao_strength=0.2,
                     env_diffuse_scale=1.0, env_specular_scale=1.0,
-                    env_diffuse_mode="learned", env_ambient_floor=0.0,
-                    shadow_map=None, sun_viewmat=None, sun_K=None, shadow_map_size=2048):
+                    env_diffuse_mode="learned", env_ambient_floor=0.0):
     """
     Image-space PBR shading with environment map and analytic sun.
     
@@ -346,41 +346,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
     roughness = roughness_map.reshape(N, 1).clamp(min_roughness, 1.0)
     metallic = metallic_map.reshape(N, 1).clamp(0, 1)
     sunvis = sunvis_map.reshape(N, 1)
-    
-    # ---- Shadow map override ----
-    if shadow_map is not None and sun_viewmat is not None and sun_K is not None and means_map is not None:
-        means_flat = means_map.reshape(N, 3)
-        means_homog = torch.cat([means_flat, torch.ones(N, 1, device=device)], dim=-1)
-        means_sun = (sun_viewmat @ means_homog.T).T[:, :3]  # [N, 3]
-        sun_z = means_sun[:, 2:3].clamp(min=1e-6)
-        sun_uv = (sun_K @ (means_sun / sun_z).T).T[:, :2]  # [N, 2]
-        
-        # Normalize to [-1, 1] for grid_sample
-        grid_x = (sun_uv[:, 0] / float(shadow_map_size)) * 2.0 - 1.0
-        grid_y = (sun_uv[:, 1] / float(shadow_map_size)) * 2.0 - 1.0
-        grid = torch.stack([grid_x, grid_y], dim=-1).view(1, H, W, 2)
-        
-        # Sample sun depth map
-        sampled_depth = F.grid_sample(
-            shadow_map.unsqueeze(0).unsqueeze(0),  # [1, 1, H, W]
-            grid,
-            mode='bilinear',
-            padding_mode='border',
-            align_corners=False,
-        ).squeeze()  # [H, W]
-        
-        # Shadow test: if pixel is farther from sun than shadow map depth, it's in shadow
-        bias = 0.005
-        pixel_depth = means_sun[:, 2].view(H, W)
-        shadow_vis = (pixel_depth <= sampled_depth + bias).float().unsqueeze(-1)  # [H, W, 1]
-        
-        # Only override where we have valid depth (not sky)
-        if depth_map is not None:
-            valid = (depth_map.reshape(H, W, 1) > 0).float().reshape(N, 1)
-            sunvis = shadow_vis.reshape(N, 1) * valid + sunvis * (1.0 - valid)
-        else:
-            sunvis = shadow_vis.reshape(N, 1)
-    
+
     viewdir = F.normalize(viewdir_map.reshape(N, 3), dim=-1)
     
     # ---- Environment lighting (IBL) ----

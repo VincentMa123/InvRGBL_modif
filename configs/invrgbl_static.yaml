@@ -81,6 +81,8 @@ trainer:
       w: 0.1
     intensity:
       w: 1.0
+      stage1_w: null
+      stage2_w: null
       normalize_valid_pixels: true
     ref_neighborhood_smoothness:
       w: 0.05

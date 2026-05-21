@@ -178,6 +178,8 @@ def render(
     rendered_reflectivity= []
     rendered_intensity = []
     rendered_sun_visibility = []
+    rendered_dynamic_box_sun_visibility = []
+    rendered_dynamic_box_contact_shadow = []
     # sky
     opacities, sky_masks = [], []
     Background_opacities, RigidNodes_opacities, DeformableNodes_opacities, SMPLNodes_opacities, Dynamic_opacities = [], [], [], [], []
@@ -332,6 +334,16 @@ def render(
             if "rendered_sun_visibility" in results:
                 sun_visibility = results["rendered_sun_visibility"]
                 rendered_sun_visibility.append(apply_colormap(get_numpy(sun_visibility), cmap_name="gray")) 
+            if "rendered_dynamic_box_sun_visibility" in results:
+                box_sun_visibility = results["rendered_dynamic_box_sun_visibility"]
+                rendered_dynamic_box_sun_visibility.append(
+                    apply_colormap(get_numpy(box_sun_visibility), cmap_name="gray")
+                )
+            if "rendered_dynamic_box_contact_shadow" in results:
+                contact_shadow = results["rendered_dynamic_box_contact_shadow"]
+                rendered_dynamic_box_contact_shadow.append(
+                    apply_colormap(get_numpy(contact_shadow), cmap_name="gray")
+                )
 
             if "rendered_pbr" in results:
                 pbr = results["rendered_pbr"]
@@ -527,6 +539,10 @@ def render(
         results_dict["gt_intensity"] = gt_intensitys
     if len(rendered_sun_visibility) > 0:
         results_dict["rendered_sun_visibility"] = rendered_sun_visibility
+    if len(rendered_dynamic_box_sun_visibility) > 0:
+        results_dict["rendered_dynamic_box_sun_visibility"] = rendered_dynamic_box_sun_visibility
+    if len(rendered_dynamic_box_contact_shadow) > 0:
+        results_dict["rendered_dynamic_box_contact_shadow"] = rendered_dynamic_box_contact_shadow
     if len(rendered_normals)>0:
         results_dict["rendered_normal"] = rendered_normals
     if len(pbrs)>0:
