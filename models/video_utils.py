@@ -25,6 +25,22 @@ from utils.visualization import (
 
 logger = logging.getLogger()
 
+
+def _pad_video_frame(frame: np.ndarray, block_size: int = 16) -> np.ndarray:
+    """Pad video frames so ffmpeg does not resize odd image dimensions."""
+    if block_size <= 1:
+        return frame
+    height, width = frame.shape[:2]
+    pad_h = (-height) % block_size
+    pad_w = (-width) % block_size
+    if pad_h == 0 and pad_w == 0:
+        return frame
+    pad_width = [(0, pad_h), (0, pad_w)]
+    if frame.ndim == 3:
+        pad_width.append((0, 0))
+    return np.pad(frame, pad_width, mode="edge")
+
+
 def get_numpy(x: Tensor) -> np.ndarray:
     return x.squeeze().cpu().numpy()
 
@@ -177,6 +193,7 @@ def render(
     pbrs_background = []
     pbrs_dynamic = []
     rendered_pbr_dynamic_composite_mask = []
+    rendered_spotlight = []
     rendered_roughness =[]
     rendered_metallic = []
     rendered_reflectivity= []
@@ -390,6 +407,9 @@ def render(
                 rendered_pbr_dynamic_composite_mask.append(
                     apply_colormap(get_numpy(dynamic_composite_mask), cmap_name="gray")
                 )
+            if "rendered_spotlight" in results:
+                spotlight = results["rendered_spotlight"]
+                rendered_spotlight.append(get_numpy(spotlight))
             
             if "intensity_images" in image_infos:
                 gt_intensity = image_infos["intensity_images"]
@@ -605,6 +625,8 @@ def render(
         results_dict["rendered_pbr_dynamic"] = pbrs_dynamic
     if len(rendered_pbr_dynamic_composite_mask)>0:
         results_dict["rendered_pbr_dynamic_composite_mask"] = rendered_pbr_dynamic_composite_mask
+    if len(rendered_spotlight)>0:
+        results_dict["rendered_spotlight"] = rendered_spotlight
     results_dict["cam_names"] = cam_names
     results_dict["cam_ids"] = cam_ids
     if len(opacities) > 0:
@@ -731,7 +753,7 @@ def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30
             
             # Convert to uint8 and write to video
             rgb_uint8 = (rgb * 255).astype(np.uint8)
-            writer.append_data(rgb_uint8)
+            writer.append_data(_pad_video_frame(rgb_uint8))
     
     writer.close()
     print(f"Video saved to {save_path}")
@@ -797,7 +819,7 @@ def save_concatenated_videos(
         merged_frame = to8b(np.concatenate(merged_list, axis=0))
         if i == return_frame_id:
             return_frame = merged_frame
-        writer.append_data(merged_frame)
+        writer.append_data(_pad_video_frame(merged_frame))
     writer.close()
     if verbose:
         logger.info(f"saved video to {save_pth}")
@@ -874,7 +896,7 @@ def save_seperate_videos(
                     )
             # frames = to8b(np.concatenate(frames, axis=1))
             frames = to8b(tiled_img)
-            writer.append_data(frames)
+            writer.append_data(_pad_video_frame(frames))
             if i == return_frame_id:
                 return_frame_dict[key] = frames
         # close the writer

@@ -1,0 +1,137 @@
+{
+  "available_vehicle_ids": [
+    {
+      "local_id": 0,
+      "visible_frames": 51,
+      "size": [
+        4.880425453186035,
+        1.963651418685913,
+        1.5200001001358032
+      ],
+      "trajectory_extent": 14.351226806640625
+    },
+    {
+      "local_id": 1,
+      "visible_frames": 51,
+      "size": [
+        4.512173652648926,
+        1.8487967252731323,
+        1.7299997806549072
+      ],
+      "trajectory_extent": 3.009352684020996
+    },
+    {
+      "local_id": 2,
+      "visible_frames": 51,
+      "size": [
+        4.636756896972656,
+        1.8888185024261475,
+        1.3600000143051147
+      ],
+      "trajectory_extent": 14.48250675201416
+    },
+    {
+      "local_id": 3,
+      "visible_frames": 51,
+      "size": [
+        4.306267738342285,
+        1.9263005256652832,
+        1.4799998998641968
+      ],
+      "trajectory_extent": 6.291343688964844
+    },
+    {
+      "local_id": 4,
+      "visible_frames": 51,
+      "size": [
+        4.574604034423828,
+        2.1713807582855225,
+        2.1700000762939453
+      ],
+      "trajectory_extent": 6.694526672363281
+    },
+    {
+      "local_id": 5,
+      "visible_frames": 31,
+      "size": [
+        4.819939613342285,
+        2.109126567840576,
+        1.5
+      ],
+      "trajectory_extent": 22.800094604492188
+    }
+  ],
+  "fixed": [
+    {
+      "name": "corner_lamp",
+      "position": [
+        26.288,
+        -3.005,
+        6.3
+      ],
+      "direction": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "color": [
+        1.0,
+        0.86,
+        0.65
+      ],
+      "intensity": 120.0,
+      "cutoff_angle": 0.9,
+      "distance_bias": 3.0,
+      "max_distance": 60.0
+    }
+  ],
+  "vehicle_headlights": [
+    {
+      "name": "car_headlights",
+      "class_name": "RigidNodes",
+      "instance_ids": [
+        0,
+        2,
+        3,
+        4,
+        5
+      ],
+      "color": [
+        1.0,
+        0.88,
+        0.65
+      ],
+      "intensity": 58.0,
+      "cutoff_angle": 0.42,
+      "distance_bias": 4.0,
+      "max_distance": 55.0
+    }
+  ],
+  "ego_headlights": [
+    {
+      "name": "pov_headlight_wash",
+      "offsets": [
+        [
+          0.0,
+          0.7,
+          1.15
+        ]
+      ],
+      "direction": [
+        0.0,
+        0.04,
+        1.0
+      ],
+      "color": [
+        1.0,
+        0.9,
+        0.72
+      ],
+      "intensity": 18.0,
+      "cutoff_angle": 0.9,
+      "distance_bias": 22.0,
+      "max_distance": 30.0,
+      "distance_fade": 12.0
+    }
+  ]
+}
