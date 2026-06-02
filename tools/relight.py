@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -25,6 +25,7 @@ logger = logging.getLogger()
 DEFAULT_KEYS = [
     "rgbs",
     "rendered_pbr",
+    "rendered_spotlight",
     "rendered_pbr_layered",
     "rendered_pbr_background",
     "rendered_pbr_dynamic",
@@ -115,17 +116,86 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
         args.sky_scale = preset["sky_scale"]
 
 
-def load_spotlights(path: Optional[str]) -> Optional[List[Dict]]:
+def _validate_fixed_spotlight(light: Any, index: int, source: str) -> Dict:
+    if not isinstance(light, dict):
+        raise ValueError(f"{source} spotlight {index} must be a JSON object")
+    if "position" not in light or "intensity" not in light:
+        raise ValueError(f"{source} spotlight {index} needs 'position' and 'intensity'")
+    return dict(light)
+
+
+def _normalize_instance_ids(value: Any, source: str) -> List[int]:
+    if value is None:
+        raise ValueError(f"{source} needs 'instance_ids'")
+    if isinstance(value, int):
+        return [int(value)]
+    if isinstance(value, str):
+        ids = [item.strip() for item in value.split(",") if item.strip()]
+        return [int(item) for item in ids]
+    if isinstance(value, list):
+        return [int(item) for item in value]
+    raise ValueError(f"{source}.instance_ids must be an int, comma-separated string, or list")
+
+
+def _validate_vehicle_headlights(cfg: Any, index: int) -> Dict:
+    if not isinstance(cfg, dict):
+        raise ValueError(f"vehicle_headlights {index} must be a JSON object")
+    normalized = dict(cfg)
+    normalized["class_name"] = normalized.get("class_name", "RigidNodes")
+    normalized["instance_ids"] = _normalize_instance_ids(
+        normalized.get("instance_ids", None),
+        f"vehicle_headlights[{index}]",
+    )
+    if len(normalized["instance_ids"]) == 0:
+        raise ValueError(f"vehicle_headlights[{index}] needs at least one instance id")
+    return normalized
+
+
+def _validate_ego_headlights(cfg: Any, index: int) -> Dict:
+    if not isinstance(cfg, dict):
+        raise ValueError(f"ego_headlights {index} must be a JSON object")
+    normalized = dict(cfg)
+    normalized["name"] = normalized.get("name", f"ego_headlights_{index}")
+    return normalized
+
+
+def load_spotlights(path: Optional[str]):
     if path is None:
         return None
     with open(path, "r") as f:
         spotlights = json.load(f)
-    if not isinstance(spotlights, list):
-        raise ValueError("--spotlights must point to a JSON list of spotlight dictionaries")
-    for i, light in enumerate(spotlights):
-        if "position" not in light or "intensity" not in light:
-            raise ValueError(f"spotlight {i} needs at least 'position' and 'intensity'")
-    return spotlights
+    if isinstance(spotlights, list):
+        return [_validate_fixed_spotlight(light, i, "legacy") for i, light in enumerate(spotlights)]
+    if not isinstance(spotlights, dict):
+        raise ValueError("--spotlights must point to a JSON list or object")
+
+    fixed = spotlights.get("fixed", [])
+    vehicle_headlights = spotlights.get("vehicle_headlights", [])
+    ego_headlights = spotlights.get("ego_headlights", [])
+    if fixed is None:
+        fixed = []
+    if vehicle_headlights is None:
+        vehicle_headlights = []
+    if ego_headlights is None:
+        ego_headlights = []
+    if not isinstance(fixed, list):
+        raise ValueError("--spotlights fixed must be a list")
+    if not isinstance(vehicle_headlights, list):
+        raise ValueError("--spotlights vehicle_headlights must be a list")
+    if not isinstance(ego_headlights, list):
+        raise ValueError("--spotlights ego_headlights must be a list")
+
+    normalized = dict(spotlights)
+    normalized["fixed"] = [
+        _validate_fixed_spotlight(light, i, "fixed") for i, light in enumerate(fixed)
+    ]
+    normalized["vehicle_headlights"] = [
+        _validate_vehicle_headlights(cfg, i) for i, cfg in enumerate(vehicle_headlights)
+    ]
+    normalized["ego_headlights"] = [
+        _validate_ego_headlights(cfg, i) for i, cfg in enumerate(ego_headlights)
+    ]
+    return normalized
 
 
 def load_envmap_tensor(path: str, device: torch.device) -> tuple[torch.Tensor, bool]:
@@ -199,6 +269,8 @@ def apply_relighting(trainer, args: argparse.Namespace, device: torch.device) ->
     trainer.relight_min_roughness = float(args.min_roughness)
     trainer.relight_force_dielectric = bool(args.force_dielectric)
     trainer.spotlights = load_spotlights(args.spotlights)
+    if hasattr(trainer, "validate_spotlight_config"):
+        trainer.validate_spotlight_config(trainer.spotlights)
     trainer.render_cfg["eval_exposure_scale"] = float(args.exposure_scale)
     trainer.render_cfg["eval_disable_affine"] = bool(args.disable_affine)
     trainer.render_cfg["env_diffuse_scale"] = float(args.env_diffuse_scale)
@@ -367,6 +439,16 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(output=output_dir, level=logging.INFO)
 
     cfg, dataset, trainer = build_dataset_and_trainer(args)
+    if args.dump_spotlight_template is not None:
+        template = trainer.build_spotlight_template()
+        template_dir = os.path.dirname(args.dump_spotlight_template)
+        if template_dir:
+            os.makedirs(template_dir, exist_ok=True)
+        with open(args.dump_spotlight_template, "w") as f:
+            json.dump(template, f, indent=2)
+        logger.info("Saved spotlight template to %s", args.dump_spotlight_template)
+        return
+
     keys = parse_keys(args.keys)
 
     logger.info("Saving relighting results to %s", output_dir)
@@ -406,7 +488,8 @@ if __name__ == "__main__":
     parser.add_argument("--env_constant", type=str, default=None, help="replace EnvMap with scalar or r,g,b constant")
     parser.add_argument("--min_roughness", type=float, default=0.35, help="eval-time roughness floor")
     parser.add_argument("--force_dielectric", action="store_true", help="set metallic to zero during relighting")
-    parser.add_argument("--spotlights", type=str, default=None, help="JSON list of spotlight dictionaries")
+    parser.add_argument("--spotlights", type=str, default=None, help="JSON list or object describing fixed spotlights and vehicle headlights")
+    parser.add_argument("--dump_spotlight_template", type=str, default=None, help="write a starter spotlight JSON for this checkpoint and exit")
 
     parser.add_argument("--sky_scale", type=float, default=1.0, help="scale visible sky background SH")
     parser.add_argument("--exposure_scale", type=float, default=1.0, help="multiply final relit RGB")

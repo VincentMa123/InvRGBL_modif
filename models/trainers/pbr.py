@@ -180,6 +180,8 @@ def compute_spotlight_contribution(spotlights, means, normals, albedos, roughnes
             - "color": [3] torch.Tensor or list (optional, default white)
             - "direction": [3] torch.Tensor or list (optional, for cone)
             - "cutoff_angle": float in radians (optional, default pi/6)
+            - "distance_bias": float (optional, default 5.0)
+            - "max_distance": float (optional)
         means: [N, 3] Gaussian centers
         normals: [N, 3]
         albedos: [N, 3]
@@ -208,7 +210,20 @@ def compute_spotlight_contribution(spotlights, means, normals, albedos, roughnes
         # Inverse-square (1/dist^2) creates sharp hot-spots and ugly
         # interference stripes when multiple street-lamp pools overlap.
         # Inverse-linear (1/(dist+eps)) spreads light much more evenly.
-        falloff = sl["intensity"] / (dist + 5.0)
+        distance_bias = float(sl.get("distance_bias", 5.0))
+        falloff = sl["intensity"] / (dist + distance_bias)
+        if sl.get("max_distance", None) is not None:
+            max_distance = float(sl["max_distance"])
+            distance_fade = float(sl.get("distance_fade", 0.0))
+            if distance_fade > 0.0:
+                fade = torch.clamp((max_distance - dist) / distance_fade, 0.0, 1.0)
+                falloff = falloff * fade
+            else:
+                falloff = torch.where(
+                    dist <= max_distance,
+                    falloff,
+                    torch.zeros_like(falloff),
+                )
         
         # Angular attenuation for spotlight cone
         if "direction" in sl and sl["direction"] is not None:
@@ -309,7 +324,8 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
                     reflectivity_map=None, reflectivity_f0_strength=0.35,
                     ao_map=None, specular_ao_strength=0.2,
                     env_diffuse_scale=1.0, env_specular_scale=1.0,
-                    env_diffuse_mode="learned", env_ambient_floor=0.0):
+                    env_diffuse_mode="learned", env_ambient_floor=0.0,
+                    return_aux=False):
     """
     Image-space PBR shading with environment map and analytic sun.
     
@@ -406,7 +422,7 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
     sun_specular = sun_specular_brdf * sun_light * (F0 * 0.5 + 0.5) * sunvis * 0.3
     
     # ---- Spotlights (inference only) ----
-    spotlight_contrib = 0
+    spotlight_contrib = torch.zeros_like(albedo)
     if spotlights is not None and len(spotlights) > 0 and means_map is not None:
         means_flat = means_map.reshape(N, 3)
         spotlight_contrib = compute_spotlight_contribution(
@@ -414,8 +430,9 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
         )
     
     # ---- Combine all contributions ----
-    pbr = diffuse + specular + sun_diffuse + sun_specular + spotlight_contrib
-    pbr = linear_to_srgb(reinhard_tonemap(pbr))
+    pbr_linear = diffuse + specular + sun_diffuse + sun_specular + spotlight_contrib
+    pbr = linear_to_srgb(reinhard_tonemap(pbr_linear))
+    spotlight_rgb = linear_to_srgb(reinhard_tonemap(spotlight_contrib))
     
     # Defensive: catch NaN/Inf early in image-space PBR before they corrupt means
     if torch.isnan(pbr).any() or torch.isinf(pbr).any():
@@ -426,4 +443,9 @@ def image_space_pbr(albedo_map, normal_map, roughness_map, metallic_map, sunvis_
             f"sun_diffuse nan={torch.isnan(sun_diffuse).any()}, sun_specular nan={torch.isnan(sun_specular).any()}"
         )
     
-    return pbr.reshape(H, W, 3)
+    pbr = pbr.reshape(H, W, 3)
+    if return_aux:
+        return pbr, {
+            "rendered_spotlight": spotlight_rgb.reshape(H, W, 3),
+        }
+    return pbr

@@ -1,0 +1,27 @@
+{
+  "fixed": [
+    {
+      "name": "corner_lamp",
+      "position": [26.288, -3.005, 6.3],
+      "direction": [0.0, 0.0, -1.0],
+      "color": [1.0, 0.86, 0.65],
+      "intensity": 120.0,
+      "cutoff_angle": 0.9,
+      "distance_bias": 3.0,
+      "max_distance": 60.0
+    }
+  ],
+  "vehicle_headlights": [
+    {
+      "name": "car_headlights",
+      "class_name": "RigidNodes",
+      "instance_ids": [0, 2, 3, 4, 5],
+      "color": [1.0, 0.88, 0.65],
+      "intensity": 58.0,
+      "cutoff_angle": 0.42,
+      "distance_bias": 4.0,
+      "max_distance": 55.0
+    }
+  ],
+  "ego_headlights": []
+}

@@ -186,6 +186,306 @@ class BasicTrainer(nn.Module):
             raise ValueError(f"Expected a scalar or 3 values, got {value}")
         return torch.tensor(values, device=device, dtype=dtype)
 
+    def _cfg_int_list(self, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [int(v.strip()) for v in value.split(",") if v.strip()]
+        if isinstance(value, int):
+            return [int(value)]
+        return [int(v) for v in value]
+
+    def _cfg_bool(self, value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    def validate_spotlight_config(self, spotlights):
+        """Validate relight-time spotlight config against loaded dynamic models."""
+        if spotlights is None or isinstance(spotlights, list):
+            return
+        if not isinstance(spotlights, dict):
+            raise ValueError("--spotlights must be a JSON list or object")
+
+        for i, light in enumerate(spotlights.get("fixed", [])):
+            if "position" not in light or "intensity" not in light:
+                raise ValueError(f"fixed spotlight {i} needs 'position' and 'intensity'")
+
+        for i, cfg in enumerate(spotlights.get("vehicle_headlights", [])):
+            class_name = cfg.get("class_name", "RigidNodes")
+            model = self.models.get(class_name, None)
+            if model is None:
+                raise ValueError(
+                    f"vehicle_headlights[{i}] requested class {class_name!r}, "
+                    f"but available models are {list(self.models.keys())}"
+                )
+            if not all(hasattr(model, attr) for attr in ("instances_fv", "instances_trans", "instances_quats", "instances_size")):
+                raise ValueError(f"model {class_name!r} does not expose tracked instance boxes")
+            num_instances = int(model.instances_fv.shape[1])
+            instance_ids = self._cfg_int_list(cfg.get("instance_ids", []))
+            if len(instance_ids) == 0:
+                raise ValueError(f"vehicle_headlights[{i}] needs at least one instance id")
+            bad_ids = [idx for idx in instance_ids if idx < 0 or idx >= num_instances]
+            if bad_ids:
+                raise ValueError(
+                    f"vehicle_headlights[{i}] has invalid {class_name} instance id(s) {bad_ids}; "
+                    f"valid local ids are 0..{num_instances - 1}"
+                )
+
+        for i, cfg in enumerate(spotlights.get("ego_headlights", [])):
+            if "intensity" not in cfg:
+                raise ValueError(f"ego_headlights[{i}] needs 'intensity'")
+
+    def _get_instance_pose_tensors(self, model):
+        cur_frame = int(self.cur_frame.item())
+        quats_cur_frame = model.instances_quats[cur_frame]
+        trans_cur_frame = model.instances_trans[cur_frame]
+        if quats_cur_frame.dim() > 2:
+            quats_cur_frame = quats_cur_frame[..., 0, :]
+
+        num_frames = model.instances_fv.shape[0]
+        use_interp = (
+            getattr(model, "in_test_set", False)
+            and cur_frame - 1 > 0
+            and cur_frame + 1 < num_frames
+        )
+        if use_interp:
+            inter_valid = (
+                model.instances_fv[cur_frame - 1]
+                & model.instances_fv[cur_frame + 1]
+            )
+            if inter_valid.any():
+                quats_prev = model.instances_quats[cur_frame - 1]
+                quats_next = model.instances_quats[cur_frame + 1]
+                if quats_prev.dim() > 2:
+                    quats_prev = quats_prev[..., 0, :]
+                    quats_next = quats_next[..., 0, :]
+                interp_quats = interpolate_quats(quats_prev.clone(), quats_next.clone())
+                quats_cur_frame = torch.where(
+                    inter_valid[:, None], interp_quats, quats_cur_frame
+                )
+                interp_trans = (
+                    model.instances_trans[cur_frame - 1]
+                    + model.instances_trans[cur_frame + 1]
+                ) * 0.5
+                trans_cur_frame = torch.where(
+                    inter_valid[:, None], interp_trans, trans_cur_frame
+                )
+
+        rotations = quat_to_rotmat(model.quat_act(quats_cur_frame))
+        return cur_frame, trans_cur_frame, rotations, model.instances_size
+
+    def _resolve_vehicle_headlights(self, cfg: Dict) -> List[Dict]:
+        class_name = cfg.get("class_name", "RigidNodes")
+        model = self.models.get(class_name, None)
+        if model is None:
+            return []
+
+        cur_frame, centers, rotations, sizes = self._get_instance_pose_tensors(model)
+        visible = model.instances_fv[cur_frame].bool()
+        device = centers.device
+        dtype = centers.dtype
+
+        instance_ids = self._cfg_int_list(cfg.get("instance_ids", []))
+        color = cfg.get("color", [1.0, 0.88, 0.65])
+        intensity = float(cfg.get("intensity", 28.0))
+        cutoff_angle = float(cfg.get("cutoff_angle", 0.35))
+        distance_bias = float(cfg.get("distance_bias", 4.0))
+        max_distance = cfg.get("max_distance", 55.0)
+        local_direction = self._cfg_vec3(
+            cfg.get("direction", [1.0, 0.0, -0.03]),
+            [1.0, 0.0, -0.03],
+            device,
+            dtype,
+        )
+        local_direction = local_direction / local_direction.norm().clamp_min(1e-6)
+
+        front_offset = float(cfg.get("front_offset", 0.15))
+        lateral_scale = float(cfg.get("lateral_scale", 0.25))
+        height_scale = float(cfg.get("height_scale", -0.18))
+
+        resolved = []
+        for instance_id in instance_ids:
+            if not bool(visible[instance_id].item()):
+                continue
+            center = centers[instance_id]
+            rotation = rotations[instance_id]
+            size = sizes[instance_id].to(device=device, dtype=dtype)
+            x = size[0] * 0.5 + front_offset
+            y = size[1] * lateral_scale
+            z = size[2] * height_scale
+            lamp_offsets = [
+                torch.stack([x, -y, z]),
+                torch.stack([x, y, z]),
+            ]
+            world_direction = rotation @ local_direction
+            world_direction = world_direction / world_direction.norm().clamp_min(1e-6)
+            for side, local_offset in zip(("left", "right"), lamp_offsets):
+                world_position = center + rotation @ local_offset
+                light = {
+                    "name": f"{cfg.get('name', 'vehicle_headlight')}_{instance_id}_{side}",
+                    "position": world_position,
+                    "direction": world_direction,
+                    "color": color,
+                    "intensity": intensity,
+                    "cutoff_angle": cutoff_angle,
+                    "distance_bias": distance_bias,
+                }
+                if max_distance is not None:
+                    light["max_distance"] = float(max_distance)
+                resolved.append(light)
+        return resolved
+
+    def _resolve_ego_headlights(self, cfg: Dict, cam: Optional[dataclass_camera]) -> List[Dict]:
+        if cam is None:
+            return []
+
+        c2w = cam.camtoworlds
+        device = c2w.device
+        dtype = c2w.dtype
+        rotation = c2w[:3, :3]
+        origin = c2w[:3, 3]
+
+        color = cfg.get("color", [1.0, 0.9, 0.72])
+        intensity = float(cfg.get("intensity", 24.0))
+        cutoff_angle = float(cfg.get("cutoff_angle", 0.45))
+        distance_bias = float(cfg.get("distance_bias", 4.0))
+        max_distance = cfg.get("max_distance", 60.0)
+        local_direction = self._cfg_vec3(
+            cfg.get("direction", [0.0, 0.08, 1.0]),
+            [0.0, 0.08, 1.0],
+            device,
+            dtype,
+        )
+        local_direction = local_direction / local_direction.norm().clamp_min(1e-6)
+        world_direction = rotation @ local_direction
+        world_direction = world_direction / world_direction.norm().clamp_min(1e-6)
+
+        offsets = cfg.get("offsets", None)
+        if offsets is None:
+            lateral = float(cfg.get("lateral_offset", 0.68))
+            vertical = float(cfg.get("vertical_offset", 0.62))
+            forward = float(cfg.get("forward_offset", 1.45))
+            offsets = [
+                [-lateral, vertical, forward],
+                [lateral, vertical, forward],
+            ]
+
+        resolved = []
+        for idx, offset in enumerate(offsets):
+            local_offset = self._cfg_vec3(offset, [0.0, 0.62, 1.45], device, dtype)
+            world_position = origin + rotation @ local_offset
+            light = {
+                "name": f"{cfg.get('name', 'ego_headlight')}_{idx}",
+                "position": world_position,
+                "direction": world_direction,
+                "color": color,
+                "intensity": intensity,
+                "cutoff_angle": cutoff_angle,
+                "distance_bias": distance_bias,
+            }
+            if max_distance is not None:
+                light["max_distance"] = float(max_distance)
+            resolved.append(light)
+        return resolved
+
+    def resolve_spotlights_for_current_frame(self, cam: Optional[dataclass_camera] = None):
+        if self.spotlights is None:
+            return None
+        if isinstance(self.spotlights, list):
+            return self.spotlights
+        if not isinstance(self.spotlights, dict):
+            return None
+
+        resolved = list(self.spotlights.get("fixed", []))
+        for cfg in self.spotlights.get("vehicle_headlights", []):
+            resolved.extend(self._resolve_vehicle_headlights(cfg))
+        for cfg in self.spotlights.get("ego_headlights", []):
+            resolved.extend(self._resolve_ego_headlights(cfg, cam))
+        return resolved
+
+    def build_spotlight_template(self) -> Dict:
+        model = self.models.get("RigidNodes", None)
+        available = []
+        selected_id = None
+        if model is not None and hasattr(model, "instances_fv"):
+            trans = model.instances_trans.detach()
+            sizes = model.instances_size.detach()
+            visible_counts = model.instances_fv.detach().bool().sum(dim=0)
+            for idx in range(int(model.instances_fv.shape[1])):
+                valid = model.instances_fv[:, idx].detach().bool()
+                if valid.any():
+                    valid_trans = trans[valid, idx]
+                    extent = (
+                        torch.norm(valid_trans[1:] - valid_trans[:-1], dim=-1).sum()
+                        if valid_trans.shape[0] > 1
+                        else torch.zeros((), device=trans.device)
+                    )
+                else:
+                    extent = torch.zeros((), device=trans.device)
+                entry = {
+                    "local_id": idx,
+                    "visible_frames": int(visible_counts[idx].item()),
+                    "size": [float(v) for v in sizes[idx].detach().cpu().tolist()],
+                    "trajectory_extent": float(extent.detach().cpu().item()),
+                }
+                available.append(entry)
+            if available:
+                selected_id = max(available, key=lambda item: (item["visible_frames"], item["trajectory_extent"]))["local_id"]
+
+        origin = self.scene_origin.detach().cpu()
+        pos = torch.tensor(
+            [origin[0].item() + 20.0, origin[1].item() - 8.0, origin[2].item() + 4.0],
+            dtype=torch.float32,
+        )
+        direction = origin - pos
+        direction = direction / direction.norm().clamp_min(1e-6)
+
+        return {
+            "available_vehicle_ids": available,
+            "fixed": [
+                {
+                    "name": "corner_lamp",
+                    "position": [float(v) for v in pos.tolist()],
+                    "direction": [float(v) for v in direction.tolist()],
+                    "color": [1.0, 0.86, 0.65],
+                    "intensity": 35.0,
+                    "cutoff_angle": 0.7,
+                    "distance_bias": 5.0,
+                    "max_distance": 45.0,
+                }
+            ],
+            "vehicle_headlights": [
+                {
+                    "name": "car_headlights",
+                    "class_name": "RigidNodes",
+                    "instance_ids": [] if selected_id is None else [int(selected_id)],
+                    "color": [1.0, 0.88, 0.65],
+                    "intensity": 28.0,
+                    "cutoff_angle": 0.35,
+                    "distance_bias": 4.0,
+                    "max_distance": 55.0,
+                }
+            ],
+            "ego_headlights": [
+                {
+                    "name": "pov_headlights",
+                    "offsets": [
+                        [-0.68, 0.62, 1.45],
+                        [0.68, 0.62, 1.45],
+                    ],
+                    "direction": [0.0, 0.08, 1.0],
+                    "color": [1.0, 0.9, 0.72],
+                    "intensity": 24.0,
+                    "cutoff_angle": 0.45,
+                    "distance_bias": 4.0,
+                    "max_distance": 60.0,
+                }
+            ],
+        }
+
     def compute_lidar_intensity_for_loss(
         self,
         outputs: Dict[str, torch.Tensor],
@@ -1251,9 +1551,10 @@ class BasicTrainer(nn.Module):
                         )
                     
                     # Add inference-time spotlights (e.g. headlights, street lamps)
-                    if self.spotlights is not None and len(self.spotlights) > 0:
+                    legacy_spotlights = self.resolve_spotlights_for_current_frame(cam) if not self.training else None
+                    if legacy_spotlights is not None and len(legacy_spotlights) > 0:
                         spotlight_color = compute_spotlight_contribution(
-                            self.spotlights, gs.means, normals, albedos, roughness, viewdirs
+                            legacy_spotlights, gs.means, normals, albedos, roughness, viewdirs
                         )
                         brdf_color = brdf_color + spotlight_color
                     
@@ -1419,9 +1720,12 @@ class BasicTrainer(nn.Module):
                     rendered_pbr_dynamic = None
                     rendered_pbr_layered = None
                     rendered_pbr_dynamic_composite_mask = None
+                    rendered_spotlight = None
                     background_renders = None
                     background_alphas = None
                     background_depth = None
+                    resolved_spotlights = self.resolve_spotlights_for_current_frame(cam) if not self.training else None
+                    use_spotlight_aux = (not self.training) and self.spotlights is not None
 
                     dynamic_box_cfg = self.render_cfg.get("dynamic_box_sun_visibility", {})
                     if dynamic_box_cfg is None:
@@ -1535,7 +1839,7 @@ class BasicTrainer(nn.Module):
                                 else (ao_map * dynamic_box_contact_shadow).clamp(0.0, 1.0)
                             )
 
-                    pbr_rgb = image_space_pbr(
+                    pbr_result = image_space_pbr(
                         albedo_map=pbr_albedo,
                         normal_map=pbr_normal,
                         roughness_map=pbr_roughness,
@@ -1545,7 +1849,7 @@ class BasicTrainer(nn.Module):
                         env_map=env_map,
                         sun_dir=sun_dir,
                         sun_intensity=sun_intensity,
-                        spotlights=self.spotlights if not self.training else None,
+                        spotlights=resolved_spotlights,
                         depth_map=rendered_depth,
                         means_map=means_map,
                         min_roughness=train_min_roughness,
@@ -1556,7 +1860,13 @@ class BasicTrainer(nn.Module):
                         env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
                         env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
                         env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
+                        return_aux=use_spotlight_aux,
                     )
+                    if use_spotlight_aux:
+                        pbr_rgb, pbr_aux = pbr_result
+                        rendered_spotlight = pbr_aux["rendered_spotlight"] * alphas[..., None]
+                    else:
+                        pbr_rgb = pbr_result
                     pbr_rgb = pbr_rgb * alphas[..., None]
 
                     if dynamic_box_cfg.get("enabled", False) and dynamic_box_cfg.get("layer_separated_pbr", False):
@@ -1634,7 +1944,7 @@ class BasicTrainer(nn.Module):
                             if (not self.training and getattr(self, "relight_force_dielectric", False))
                             else dyn_metallic
                         )
-                        bg_pbr_shaded = image_space_pbr(
+                        bg_pbr_result = image_space_pbr(
                             albedo_map=bg_albedo,
                             normal_map=bg_normal,
                             roughness_map=bg_roughness,
@@ -1644,7 +1954,7 @@ class BasicTrainer(nn.Module):
                             env_map=env_map,
                             sun_dir=sun_dir,
                             sun_intensity=sun_intensity,
-                            spotlights=self.spotlights if not self.training else None,
+                            spotlights=resolved_spotlights,
                             depth_map=bg_depth,
                             means_map=bg_means_map,
                             min_roughness=train_min_roughness,
@@ -1655,8 +1965,9 @@ class BasicTrainer(nn.Module):
                             env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
                             env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
                             env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
+                            return_aux=use_spotlight_aux,
                         )
-                        dyn_pbr_shaded = image_space_pbr(
+                        dyn_pbr_result = image_space_pbr(
                             albedo_map=dyn_albedo,
                             normal_map=dyn_normal,
                             roughness_map=dyn_roughness,
@@ -1666,7 +1977,7 @@ class BasicTrainer(nn.Module):
                             env_map=env_map,
                             sun_dir=sun_dir,
                             sun_intensity=sun_intensity,
-                            spotlights=self.spotlights if not self.training else None,
+                            spotlights=resolved_spotlights,
                             depth_map=dyn_depth,
                             means_map=dyn_means_map,
                             min_roughness=train_min_roughness,
@@ -1677,7 +1988,14 @@ class BasicTrainer(nn.Module):
                             env_specular_scale=float(self.render_cfg.get("env_specular_scale", 1.0)),
                             env_diffuse_mode=self.render_cfg.get("env_diffuse_mode", "learned"),
                             env_ambient_floor=float(self.render_cfg.get("env_ambient_floor", 0.0)),
+                            return_aux=use_spotlight_aux,
                         )
+                        if use_spotlight_aux:
+                            bg_pbr_shaded, bg_pbr_aux = bg_pbr_result
+                            dyn_pbr_shaded, dyn_pbr_aux = dyn_pbr_result
+                        else:
+                            bg_pbr_shaded = bg_pbr_result
+                            dyn_pbr_shaded = dyn_pbr_result
 
                         dynamic_depth_margin = float(dynamic_box_cfg.get("layer_dynamic_depth_margin", 0.25))
                         dynamic_foreground = (
@@ -1697,10 +2015,16 @@ class BasicTrainer(nn.Module):
                         rendered_pbr_dynamic = dyn_pbr
                         rendered_pbr_layered = pbr_rgb
                         rendered_pbr_dynamic_composite_mask = dyn_composite_alpha
+                        if use_spotlight_aux:
+                            bg_spotlight = bg_pbr_aux["rendered_spotlight"] * bg_opacity.clamp(0.0, 1.0)
+                            dyn_spotlight = dyn_pbr_aux["rendered_spotlight"] * dyn_composite_alpha
+                            rendered_spotlight = dyn_spotlight + bg_spotlight * (1.0 - dyn_composite_alpha)
 
                     if (not self.training) and self.render_cfg.get("eval_exposure_scale", 1.0) != 1.0:
                         exposure_scale = float(self.render_cfg.get("eval_exposure_scale", 1.0))
                         pbr_rgb = pbr_rgb * exposure_scale
+                        if rendered_spotlight is not None:
+                            rendered_spotlight = rendered_spotlight * exposure_scale
                         if rendered_pbr_layered is not None:
                             rendered_pbr_layered = rendered_pbr_layered * exposure_scale
                         if rendered_pbr_background is not None:
@@ -1762,6 +2086,10 @@ class BasicTrainer(nn.Module):
                 if 'rendered_pbr_dynamic_composite_mask' in locals() and rendered_pbr_dynamic_composite_mask is not None:
                     info.update({
                         'rendered_pbr_dynamic_composite_mask': rendered_pbr_dynamic_composite_mask,
+                    })
+                if 'rendered_spotlight' in locals() and rendered_spotlight is not None:
+                    info.update({
+                        'rendered_spotlight': rendered_spotlight,
                     })
 
             else:
@@ -1832,6 +2160,10 @@ class BasicTrainer(nn.Module):
             if 'rendered_pbr_dynamic_composite_mask' in self.info:
                 results.update({
                     'rendered_pbr_dynamic_composite_mask': self.info['rendered_pbr_dynamic_composite_mask'],
+                })
+            if 'rendered_spotlight' in self.info:
+                results.update({
+                    'rendered_spotlight': self.info['rendered_spotlight'],
                 })
         
         if self.training:
